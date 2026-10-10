@@ -1,0 +1,47 @@
+{
+  "name": "gongzuo-agent",
+  "version": "0.1.0",
+  "private": true,
+  "author": "共作开源项目",
+  "description": "面向企业团队的 macOS Agent 工作台",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "workbuddy:mcp-config": "node scripts/print-workbuddy-mcp-config.cjs",
+    "check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/store.cjs && node --check electron/task-runner.cjs && node --check electron/agent-service.cjs && node --check electron/connection-service.cjs && node --check electron/workbuddy-service.cjs && node --check electron/wecom-service.cjs && node --check electron/wecom-bot-service.cjs && node --check electron/channel-inbox.cjs && node --check electron/workflow-service.cjs && node --check electron/codebuddy-service.cjs && node --check electron/local-agent-service.cjs && node --check electron/provider-links.cjs && node --check electron/memory-service.cjs && node --check electron/settings-service.cjs && node --check electron/document-service.cjs && node --check electron/workspace-service.cjs && node --check electron/mention-service.cjs && node --check demo/app.js",
+    "test": "node --test test/*.test.cjs",
+    "pack:mac": "electron-builder --mac dir",
+    "dist:mac": "electron-builder --mac zip",
+    "dist:dmg": "electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "electron": "^44.4.3",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "cn.gongzuo.agent",
+    "protocols": [{ "name": "共作工作链接", "schemes": ["gongzuo"] }],
+    "productName": "共作",
+    "asar": true,
+    "files": [
+      "electron/**/*",
+      "demo/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  },
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.7"
+  }
+}
