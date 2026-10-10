@@ -51,18 +51,19 @@ class AgentService {
   getStatus(settings) {
     const configured = settings?.agent?.mode === 'external'
       ? Boolean(settings.agent.endpoint)
-      : ['codebuddy', 'codex', 'kimi'].includes(settings?.agent?.mode)
+      : ['codebuddy', 'codex', 'kimi', 'workbuddy'].includes(settings?.agent?.mode)
         ? true
-        : settings?.agent?.mode === 'workbuddy'
-          ? Boolean(settings.hasWorkbuddyAccessToken)
         : Boolean(settings?.model?.modelId && (settings.model.provider === 'local' || settings.hasModelKey));
     const kind = ['external', 'codebuddy', 'workbuddy', 'codex', 'kimi'].includes(settings?.agent?.mode) ? 'agent' : 'model';
     const checked = settings?.checks?.[kind];
+    const handoff = settings?.agent?.mode === 'workbuddy' && !settings.hasWorkbuddyAccessToken;
     return {
-      mode: configured || settings?.agent?.mode === 'workbuddy' ? kind : this.mode,
-      label: checked?.ok ? '连接测试通过' : configured ? '已配置 · 待验证' : settings?.agent?.mode === 'workbuddy' ? 'WorkBuddy 待授权' : '本地演示模式',
+      mode: configured ? kind : this.mode,
+      label: checked?.ok ? '连接测试通过' : handoff ? 'WorkBuddy 本机连接' : configured ? '已配置 · 待验证' : '本地演示模式',
       modelConnected: Boolean(checked?.ok),
-      detail: checked?.ok ? '当前配置已通过连接测试；发起工作时会调用该服务。' : configured ? '发起工作时会尝试调用已配置的服务；可在设置中先测试连接。' : settings?.agent?.mode === 'workbuddy' ? '需要先完成 WorkBuddy 开放平台授权。' : '任务会保存并使用本地规则演示。'
+      detail: handoff
+        ? '工作会排队等待 WorkBuddy 通过本机连接器领取，处理结果回到同一项工作。'
+        : checked?.ok ? '当前配置已通过连接测试；发起工作时会调用该服务。' : configured ? '发起工作时会尝试调用已配置的服务；可在设置中先测试连接。' : '任务会保存并使用本地规则演示。'
     };
   }
 
@@ -70,12 +71,15 @@ class AgentService {
     if (config?.agent?.mode === 'external') return Boolean(config.agent.endpoint);
     if (config?.agent?.mode === 'codebuddy') return true;
     if (['codex', 'kimi'].includes(config?.agent?.mode)) return true;
-    if (config?.agent?.mode === 'workbuddy') return Boolean(config.workbuddyAccessToken);
+    // Without an OAuth token WorkBuddy still works through the local MCP hand-off.
+    if (config?.agent?.mode === 'workbuddy') return true;
     return Boolean(config?.model?.modelId && (!['openai', 'kimi', 'deepseek'].includes(config.model.provider) || config.modelKey || (config.model.provider === 'openai' && process.env.OPENAI_API_KEY)));
   }
 
   async answer(task, config, memoryContext = {}) {
     if (!this.isConfigured(config)) return null;
+    // The local hand-off is pulled by WorkBuddy; TaskRunner never calls answer() for it.
+    if (config.agent.mode === 'workbuddy' && !config.workbuddyAccessToken) return null;
     try {
       const result = config.agent.mode === 'external'
         ? await callExternalAgent(config, task.messages, task.workspace, memoryContext, this.fetchImpl)

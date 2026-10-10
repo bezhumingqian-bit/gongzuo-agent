@@ -14,6 +14,7 @@ const { createProjectWorkspace, addProjectMember, linkWecomProjectMember, remove
 const { TaskRunner } = require('./task-runner.cjs');
 const { WecomDelivery, recipientUserId, fetchVisibleMembers, sendViaWecom } = require('./wecom-service.cjs');
 const { WecomBotBridge } = require('./wecom-bot-service.cjs');
+const { WorkBuddyBridge } = require('./workbuddy-bridge.cjs');
 
 let mainWindow;
 let store;
@@ -24,6 +25,7 @@ let documentService;
 let taskRunner;
 let wecomDelivery;
 let wecomBot;
+let workbuddyBridge;
 let pendingTaskLink = null;
 const agent = new AgentService();
 
@@ -88,7 +90,7 @@ function registerIpc() {
   ipcMain.handle('settings:get', async event => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     const data = await store.read();
-    return { ...await settingsService.getPublic(), wecomBotStatus: wecomBot?.status || '未配置', wecomBotLastTextFrameAt: wecomBot?.lastTextFrameAt || null, wecomBotLastTextFrameStatus: wecomBot?.lastTextFrameStatus || '尚未收到', wecomRecentInbound: (data.wecomEvents || []).slice(-5).reverse().map(({ userId, chatType, at }) => ({ userId, chatType, at })) };
+    return { ...await settingsService.getPublic(), workbuddyBridge: workbuddyBridge?.status || { listening: false, lastClientAt: null }, wecomBotStatus: wecomBot?.status || '未配置', wecomBotLastTextFrameAt: wecomBot?.lastTextFrameAt || null, wecomBotLastTextFrameStatus: wecomBot?.lastTextFrameStatus || '尚未收到', wecomRecentInbound: (data.wecomEvents || []).slice(-5).reverse().map(({ userId, chatType, at }) => ({ userId, chatType, at })) };
   });
 
   ipcMain.handle('settings:save', async (event, input) => {
@@ -103,6 +105,16 @@ function registerIpc() {
     if (!['model', 'agent', 'wecom'].includes(kind)) throw new Error('连接类型无效');
     const config = await settingsService.getRuntimeConfig();
     let result;
+    if (kind === 'agent' && config.agent?.mode === 'workbuddy' && !config.workbuddyAccessToken) {
+      const bridge = workbuddyBridge?.status;
+      result = !bridge?.listening
+        ? { ok: false, message: '共作本机连接未启动，请重启共作' }
+        : bridge.lastClientAt
+          ? { ok: true, message: `WorkBuddy 已通过本机连接器访问共作（最近一次 ${bridge.lastClientAt.slice(0, 19).replace('T', ' ')} UTC）` }
+          : { ok: false, message: '本机连接已就绪，但 WorkBuddy 尚未调用；请在 WorkBuddy 中信任「gongzuo」连接器后让它查看共作待处理工作' };
+      await settingsService.recordCheck(kind, result);
+      return result;
+    }
     try { result = await testConnection(kind, config); }
     catch (error) { result = { ok: false, message: error.message }; }
     await settingsService.recordCheck(kind, result);
@@ -495,9 +507,12 @@ app.whenReady().then(async () => {
   wecomBot = new WecomBotBridge({ store, settingsService, taskRunner, publish: publishData });
   wecomDelivery = new WecomDelivery({ store, settingsService, publish: publishData, send: (config, userId, text) => sendViaWecom(config, userId, text, wecomBot) });
   taskRunner.onAgentAnswer = event => wecomBot.sendAgentAnswer(event);
+  workbuddyBridge = new WorkBuddyBridge({ userDataDir: app.getPath('userData'), store, taskRunner, version: app.getVersion() });
   await taskRunner.markInterrupted();
   await wecomDelivery.markInterrupted();
   registerIpc();
+  try { await workbuddyBridge.start(); }
+  catch (error) { console.error('WorkBuddy 本机连接启动失败：', error.message); }
   await wecomBot.restart();
   createMenu();
   createWindow();
@@ -509,4 +524,4 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
-app.on('before-quit', () => { wecomBot?.stop(); });
+app.on('before-quit', () => { wecomBot?.stop(); workbuddyBridge?.stop().catch(() => {}); });

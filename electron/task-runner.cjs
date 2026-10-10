@@ -3,6 +3,12 @@ const { createLocalTask } = require('./agent-service.cjs');
 const { getApplicableMemories } = require('./memory-service.cjs');
 const { resolveMentions } = require('./mention-service.cjs');
 const { asksToReadWecomInbox, wecomInboxForAgent } = require('./channel-inbox.cjs');
+const { conversationInput } = require('./connection-service.cjs');
+
+// WorkBuddy has two transports: the official Open API (needs an OAuth token) and
+// the local MCP hand-off, where WorkBuddy pulls queued work from this app.
+const usesWorkBuddyOpenApi = config => config?.agent?.mode === 'workbuddy' && Boolean(config.workbuddyAccessToken);
+const usesWorkBuddyHandoff = config => config?.agent?.mode === 'workbuddy' && !config.workbuddyAccessToken;
 
 function messagesThroughTrigger(messages, triggerId) {
   const triggerIndex = messages.findIndex(item => item.id === triggerId && item.role === 'user');
@@ -153,7 +159,10 @@ class TaskRunner {
       if (task.agentMode !== mode) {
         task.agentMode = mode;
         task.agentSessionId = null;
-        if (!['failed', 'interrupted', 'not-configured'].includes(task.agentRun?.status)) {
+        if (task.agentRun?.status === 'awaiting-workbuddy') {
+          // The pending hand-off is withdrawn; keep it retryable with the new Agent.
+          task.agentRun = { status: 'interrupted', triggerId: task.agentRun.triggerId, updatedAt: new Date().toISOString() };
+        } else if (!['failed', 'interrupted', 'not-configured'].includes(task.agentRun?.status)) {
           task.agentRun = { status: 'done', updatedAt: new Date().toISOString() };
         }
         task.updatedAt = task.agentRun.updatedAt;
@@ -173,76 +182,163 @@ class TaskRunner {
     this.publish(data);
   }
 
+  // Builds exactly what an executing Agent may see for one trigger: the ordered
+  // conversation, applicable memory and the referenced document text. Shared by
+  // in-process Agents and the WorkBuddy hand-off so both get the same boundary.
+  async prepare(taskId, triggerId) {
+    const runtime = await this.settingsService.getRuntimeConfig();
+    const data = await this.store.read();
+    const task = data.tasks.find(item => item.id === taskId);
+    if (!task) return null;
+    const messages = messagesThroughTrigger(task.messages, triggerId);
+    if (!messages) return null;
+    const config = { ...runtime, agent: { ...runtime.agent, mode: task.agentMode || runtime.agent.mode } };
+    const workspaceId = data.workspaces.find(item => item.name === task.workspace)?.id;
+    const [personal, team] = await Promise.all([this.personalMemoryStore.read(), this.teamMemoryStore.read()]);
+    const triggerMessage = task.messages.find(item => item.id === triggerId);
+    const fromWecom = Boolean(triggerMessage?.wecomOrigin);
+    const readWecomInbox = !fromWecom && asksToReadWecomInbox(triggerMessage?.text, messages.slice(0, -1), task.title);
+    const memory = getApplicableMemories(fromWecom ? [] : personal.items, team.items, workspaceId);
+    if (/企微|企业微信|机器人|长连接/u.test(`${task.title} ${triggerMessage?.text || ''}`) || readWecomInbox) {
+      const recentWecomEvent = (data.wecomEvents || []).at(-1);
+      const inbox = (data.inboundMessages || []).filter(item => item.channel === 'wecom' && item.text);
+      memory.channelStatus = {
+        recentRobotCallback: recentWecomEvent ? { at: recentWecomEvent.at, chatType: recentWecomEvent.chatType } : null,
+        inbox: { savedCount: inbox.length, latestAt: inbox.at(-1)?.receivedAt || null },
+        inboxSharedForThisRequest: readWecomInbox,
+        taskDeliveries: task.messages.filter(item => item.role === 'user' && item.wecomDelivery).slice(-5).map(item => ({
+          text: String(item.text || '').slice(0, 80),
+          status: item.wecomDelivery.status
+        }))
+      };
+    }
+    const refs = triggerMessage?.documentRefs || [];
+    let attached;
+    try { attached = await Promise.all(refs.map(ref => this.documentService.readForAgent(ref.id, workspaceId))); }
+    catch (error) {
+      const failure = new Error(String(error?.message || '资料读取失败，请检查资料后重试').slice(0, 180));
+      failure.documentFailure = true;
+      throw failure;
+    }
+    const snapshot = { ...task, messages: messages.map(item => {
+      if (item.id !== triggerId) return item;
+      const parts = [item.text, ...attached.map(document => `【引用资料：${document.name}${document.truncated ? '，仅前 12000 字' : ''}】\n${document.text}`)];
+      if (readWecomInbox) {
+        const limit = usesWorkBuddyOpenApi(config) ? Math.max(0, 3850 - parts.join('\n\n').length) : 12000;
+        if (limit < 200) {
+          memory.channelStatus.inboxSharedForThisRequest = false;
+          parts.push('【企微收件原文因本次输入过长未附上；请先缩短当前消息或移除资料引用。】');
+        } else parts.push(wecomInboxForAgent(data, limit));
+      }
+      return { ...item, text: parts.join('\n\n') };
+    }) };
+    return { task, snapshot, memory, config };
+  }
+
   async run(taskId, triggerId) {
     try {
       const runtime = await this.settingsService.getRuntimeConfig();
-      const data = await this.store.read();
-      const task = data.tasks.find(item => item.id === taskId);
-      if (!task) return;
-      const messages = messagesThroughTrigger(task.messages, triggerId);
-      if (!messages) return;
-      const config = { ...runtime, agent: { ...runtime.agent, mode: task.agentMode || runtime.agent.mode } };
-      if (!this.agent.isConfigured(config)) { await this.setRunStatus(taskId, { status: 'not-configured', triggerId }); return; }
-      await this.setRunStatus(taskId, { status: 'running', triggerId });
-      const workspaceId = data.workspaces.find(item => item.name === task.workspace)?.id;
-      const [personal, team] = await Promise.all([this.personalMemoryStore.read(), this.teamMemoryStore.read()]);
-      const triggerMessage = task.messages.find(item => item.id === triggerId);
-      const fromWecom = Boolean(triggerMessage?.wecomOrigin);
-      const readWecomInbox = !fromWecom && asksToReadWecomInbox(triggerMessage?.text, messages.slice(0, -1), task.title);
-      const memory = getApplicableMemories(fromWecom ? [] : personal.items, team.items, workspaceId);
-      if (/企微|企业微信|机器人|长连接/u.test(`${task.title} ${triggerMessage?.text || ''}`) || readWecomInbox) {
-        const recentWecomEvent = (data.wecomEvents || []).at(-1);
-        const inbox = (data.inboundMessages || []).filter(item => item.channel === 'wecom' && item.text);
-        memory.channelStatus = {
-          recentRobotCallback: recentWecomEvent ? { at: recentWecomEvent.at, chatType: recentWecomEvent.chatType } : null,
-          inbox: { savedCount: inbox.length, latestAt: inbox.at(-1)?.receivedAt || null },
-          inboxSharedForThisRequest: readWecomInbox,
-          taskDeliveries: task.messages.filter(item => item.role === 'user' && item.wecomDelivery).slice(-5).map(item => ({
-            text: String(item.text || '').slice(0, 80),
-            status: item.wecomDelivery.status
-          }))
-        };
-      }
-      const refs = task.messages.find(item => item.id === triggerId)?.documentRefs || [];
-      let attached;
-      try { attached = await Promise.all(refs.map(ref => this.documentService.readForAgent(ref.id, workspaceId))); }
-      catch (error) {
-        await this.setRunStatus(taskId, { status: 'failed', triggerId, message: String(error?.message || '资料读取失败，请检查资料后重试').slice(0, 180) });
+      const before = (await this.store.read()).tasks.find(item => item.id === taskId);
+      if (!before || !messagesThroughTrigger(before.messages, triggerId)) return;
+      const selected = { ...runtime, agent: { ...runtime.agent, mode: before.agentMode || runtime.agent.mode } };
+      if (!this.agent.isConfigured(selected)) { await this.setRunStatus(taskId, { status: 'not-configured', triggerId }); return; }
+      if (usesWorkBuddyHandoff(selected)) {
+        // WorkBuddy pulls this work through the local MCP bridge; nothing runs in-process.
+        await this.setRunStatus(taskId, { status: 'awaiting-workbuddy', triggerId });
         return;
       }
-      const snapshot = { ...task, messages: messages.map(item => {
-        if (item.id !== triggerId) return item;
-        const parts = [item.text, ...attached.map(document => `【引用资料：${document.name}${document.truncated ? '，仅前 12000 字' : ''}】\n${document.text}`)];
-        if (readWecomInbox) {
-          const limit = config.agent.mode === 'workbuddy' ? Math.max(0, 3850 - parts.join('\n\n').length) : 12000;
-          if (limit < 200) {
-            memory.channelStatus.inboxSharedForThisRequest = false;
-            parts.push('【企微收件原文因本次输入过长未附上；请先缩短当前消息或移除资料引用。】');
-          } else parts.push(wecomInboxForAgent(data, limit));
-        }
-        return { ...item, text: parts.join('\n\n') };
-      }) };
-      const answer = await this.agent.answer(snapshot, config, memory);
-      const failed = answer?.source === 'connection-error';
-      const finished = await this.store.update(draft => {
-        const current = draft.tasks.find(item => item.id === taskId);
-        if (!current) return draft;
-        if (answer) current.messages.push({ ...answer, replyToId: triggerId });
-        if (answer?.agentSessionId) current.agentSessionId = answer.agentSessionId;
-        current.agentRun = { status: failed ? 'failed' : 'done', triggerId, updatedAt: new Date().toISOString() };
-        current.updatedAt = current.agentRun.updatedAt;
-        if (failed || (current.workflow && answer?.source !== 'workbuddy-pending')) current.needsMe = true;
-        if (current.workflow && !failed && answer?.source !== 'workbuddy-pending') current.status = 'review';
-        return draft;
-      });
-      this.publish(finished);
-      if (answer && typeof this.onAgentAnswer === 'function') {
-        const trigger = finished.tasks.find(item => item.id === taskId)?.messages.find(item => item.id === triggerId);
-        if (trigger?.wecomOrigin && !task.workflow) this.onAgentAnswer({ taskId, answer, origin: trigger.wecomOrigin }).catch(() => {});
+      await this.setRunStatus(taskId, { status: 'running', triggerId });
+      let prepared;
+      try { prepared = await this.prepare(taskId, triggerId); }
+      catch (error) {
+        if (!error.documentFailure) throw error;
+        await this.setRunStatus(taskId, { status: 'failed', triggerId, message: error.message });
+        return;
       }
+      if (!prepared) return;
+      const answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory);
+      await this.recordAnswer(taskId, triggerId, answer);
     } catch (error) {
       await this.setRunStatus(taskId, { status: 'failed', triggerId, message: 'Agent 执行中断，请重试' });
     }
+  }
+
+  async recordAnswer(taskId, triggerId, answer) {
+    const failed = answer?.source === 'connection-error';
+    const finished = await this.store.update(draft => {
+      const current = draft.tasks.find(item => item.id === taskId);
+      if (!current) return draft;
+      if (answer) current.messages.push({ ...answer, replyToId: triggerId });
+      if (answer?.agentSessionId) current.agentSessionId = answer.agentSessionId;
+      current.agentRun = { status: failed ? 'failed' : 'done', triggerId, updatedAt: new Date().toISOString() };
+      current.updatedAt = current.agentRun.updatedAt;
+      if (failed || (current.workflow && answer?.source !== 'workbuddy-pending')) current.needsMe = true;
+      if (current.workflow && !failed && answer?.source !== 'workbuddy-pending') current.status = 'review';
+      return draft;
+    });
+    this.publish(finished);
+    const task = finished.tasks.find(item => item.id === taskId);
+    if (answer && task && typeof this.onAgentAnswer === 'function') {
+      const trigger = task.messages.find(item => item.id === triggerId);
+      if (trigger?.wecomOrigin && !task.workflow) this.onAgentAnswer({ taskId, answer, origin: trigger.wecomOrigin }).catch(() => {});
+    }
+    return task;
+  }
+
+  // ---- WorkBuddy hand-off (pulled through the local MCP bridge) ----
+
+  async listHandoffs() {
+    const data = await this.store.read();
+    return data.tasks.filter(task => task.agentRun?.status === 'awaiting-workbuddy').map(task => ({
+      taskId: task.id,
+      triggerId: task.agentRun.triggerId,
+      title: task.title,
+      workspace: task.workspace,
+      waitingSince: task.agentRun.updatedAt || task.updatedAt,
+      claimedAt: task.agentRun.claimedAt || null,
+      fromWecom: Boolean(task.messages.find(item => item.id === task.agentRun.triggerId)?.wecomOrigin),
+      workflow: task.workflow?.type || null
+    }));
+  }
+
+  async claimHandoff(taskId) {
+    const task = (await this.store.read()).tasks.find(item => item.id === taskId);
+    if (!task) throw new Error('工作不存在');
+    if (task.agentRun?.status !== 'awaiting-workbuddy') throw new Error('这项工作当前没有等待 WorkBuddy 处理的消息');
+    const triggerId = task.agentRun.triggerId;
+    let prepared;
+    try { prepared = await this.prepare(taskId, triggerId); }
+    catch (error) {
+      if (error.documentFailure) await this.setRunStatus(taskId, { status: 'failed', triggerId, message: error.message });
+      throw error;
+    }
+    if (!prepared) throw new Error('这项工作的待处理消息已不存在');
+    const input = conversationInput(prepared.snapshot.messages, prepared.memory);
+    const claimedAt = new Date().toISOString();
+    const data = await this.store.update(draft => {
+      const current = draft.tasks.find(item => item.id === taskId);
+      if (current?.agentRun?.status === 'awaiting-workbuddy' && current.agentRun.triggerId === triggerId) current.agentRun.claimedAt = claimedAt;
+      return draft;
+    });
+    this.publish(data);
+    return {
+      taskId, triggerId, title: task.title, workspace: task.workspace, claimedAt,
+      instructions: input.instructions,
+      messages: input.messages
+    };
+  }
+
+  async submitHandoffReply(taskId, triggerId, text) {
+    const reply = String(text || '').trim();
+    if (!reply) throw new Error('回复内容不能为空');
+    if (reply.length > 50000) throw new Error('回复不能超过 50000 字');
+    const task = (await this.store.read()).tasks.find(item => item.id === taskId);
+    if (!task) throw new Error('工作不存在');
+    if (task.agentRun?.status !== 'awaiting-workbuddy') throw new Error('这项工作当前没有等待 WorkBuddy 回复的消息');
+    if (task.agentRun.triggerId !== triggerId) throw new Error('这条消息已不是最新的待处理消息；请重新读取工作后再回复');
+    const answer = { id: crypto.randomUUID(), role: 'assistant', text: reply, createdAt: new Date().toISOString(), source: 'workbuddy', via: 'local-mcp' };
+    await this.recordAnswer(taskId, triggerId, answer);
+    return { taskId, messageId: answer.id };
   }
 
   async markInterrupted() {
@@ -256,4 +352,4 @@ class TaskRunner {
   }
 }
 
-module.exports = { TaskRunner, messagesThroughTrigger };
+module.exports = { TaskRunner, messagesThroughTrigger, usesWorkBuddyHandoff, usesWorkBuddyOpenApi };

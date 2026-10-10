@@ -26,10 +26,14 @@ test('本地 Agent 创建结构完整的任务', () => {
   assert.equal(task.steps.length, 3);
 });
 
-test('WorkBuddy 没有访问令牌时不排队执行', () => {
+test('WorkBuddy 没有访问令牌时走本机交接，不在进程内调用', async () => {
   const agent = new AgentService();
-  assert.equal(agent.isConfigured({ agent: { mode: 'workbuddy' }, workbuddyAccessToken: null }), false);
+  assert.equal(agent.isConfigured({ agent: { mode: 'workbuddy' }, workbuddyAccessToken: null }), true);
   assert.equal(agent.isConfigured({ agent: { mode: 'workbuddy' }, workbuddyAccessToken: 'token' }), true);
+  assert.equal(await agent.answer({ messages: [{ role: 'user', text: '测试' }] }, { agent: { mode: 'workbuddy' } }), null);
+  const status = agent.getStatus({ agent: { mode: 'workbuddy' }, hasWorkbuddyAccessToken: false });
+  assert.equal(status.label, 'WorkBuddy 本机连接');
+  assert.match(status.detail, /本机连接器领取/);
 });
 
 test('官方模型未配置密钥时不会被标为可执行', () => {

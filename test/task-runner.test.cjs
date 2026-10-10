@@ -273,6 +273,8 @@ test('摘要规则按指定 Agent 执行，保留来源并等待人工确认', a
     }
   };
   const { directory, store, runner } = await setup(agent);
+  // Open API transport: an OAuth token is configured, so the Agent runs in-process.
+  runner.settingsService = { getRuntimeConfig: async () => ({ agent: { mode: 'codex' }, workbuddyAccessToken: 'test-token' }) };
   try {
     let pushedToWecom = false;
     runner.onAgentAnswer = async () => { pushedToWecom = true; };

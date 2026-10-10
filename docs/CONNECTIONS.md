@@ -46,6 +46,18 @@ Mac 版左下角进入“连接与模型设置”。先保存配置，再点击�
 
 长期要在共作中展示执行步骤、审批和持续会话，可分别使用 [Codex App Server](https://learn.chatgpt.com/docs/app-server) 与 [Kimi ACP](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp)；当前 CLI 桥接不代表这些能力已完成。
 
+## WorkBuddy 本机连接（默认）
+
+没有开放平台令牌时，选择 WorkBuddy 的工作不会在共作内执行，而是进入「等待 WorkBuddy 领取」：
+
+1. 共作启动时在 `userData/workbuddy-bridge.sock` 开启仅本机用户可访问的 Unix 套接字（不开 TCP 端口），随机令牌写入同目录 `workbuddy-bridge.json`（权限 0600），退出时删除。
+2. WorkBuddy 的「gongzuo」stdio 连接器（`integrations/workbuddy/gongzuo-mcp.cjs`）读取该文件并调用共作。默认依次查找 `gongzuo-agent`、`gongzuo-agent-dev` 数据目录，取正在运行的最新实例；可用环境变量 `GONGZUO_BRIDGE_FILE` 指定。
+3. 连接器工具：`gongzuo_connection_test`、`gongzuo_list_pending_work`、`gongzuo_claim_work`、`gongzuo_submit_reply`、`gongzuo_list_works`、`gongzuo_get_work`、`gongzuo_create_work`。领取时共作按与其他 Agent 相同的边界准备上下文：工作对话、适用的已确认记忆、主动引用的资料正文；企微触发的工作不附带个人记忆。
+4. 回复必须带领取时的 `triggerId`；员工期间追加了新消息，旧 `triggerId` 会被拒绝，避免答非所问。回复后行为与其他 Agent 一致：摘要规则进入待确认，企微发起的工作私聊回发起者。
+5. 切换执行 Agent 会撤回等待中的交接，并标为可重试。
+
+触发方式是 WorkBuddy 主动拉取：在 WorkBuddy 里说「处理共作待办」，或为它配置定时任务。共作必须保持运行；它不会唤起 WorkBuddy。
+
 ## CodeBuddy 和 WorkBuddy
 
 CodeBuddy Code 的 [CLI 参考](https://www.codebuddy.cn/docs/cli/cli-reference)提供 `--print`、纯文本输出和工具限制参数；[官方工作流说明](https://www.codebuddy.cn/docs/cli/common-workflows)建议只需回答的集成使用纯文本输出。[Agent SDK](https://www.codebuddy.cn/docs/cli/sdk)也支持程序化调用及已有登录凭据。Mac 版现在可以在“执行 Agent”选择 CodeBuddy。共作从主进程启动本机 CLI，使用临时目录、禁用内置工具和 MCP、不保存 CLI 会话，只读取纯文本回答。它会发送当前工作对话和适用的已确认记忆，因此只应在允许共享这些内容时启用。此前 JSON 输出的真实联调未通过；现已改用纯文本并通过本地模拟测试，**还需再做一次真实请求才能确认修复**。当前没有接入 CodeBuddy 编辑文件、运行命令或恢复会话的能力。

@@ -129,14 +129,14 @@ class WecomBotBridge {
       if (summary) {
         const space = data.workspaces.find(item => item.id === config.workflow.workspaceId);
         if (!space) return reply('规则目标空间不存在，请在共作设置中重新选择。');
-        if (config.workflow.agentMode === 'workbuddy' && !config.workbuddyAccessToken) return reply('WorkBuddy 尚未授权；摘要未转交，请先在共作设置中完成授权。');
         if (config.workflow.agentMode === 'built-in' && !config.model?.modelId) return reply('内置模型尚未配置；摘要未转交。');
         const task = await this.taskRunner.create(workflowGoal(config.workflow, summary), space.name, [], origin, {
           agentMode: config.workflow.agentMode,
           workflow: { type: 'wecom-summary', sourceUserId: userId, sourceMsgId: msgId },
           title: `审核企微摘要 · ${space.name}`
         });
-        return reply(`摘要已交给${config.workflow.agentMode === 'workbuddy' ? ' WorkBuddy' : '内置 Agent'} 分析，结果将作为待确认工作保存。\n工作 ID：${task.id}`);
+        const handler = config.workflow.agentMode !== 'workbuddy' ? '内置 Agent' : config.workbuddyAccessToken ? ' WorkBuddy' : ' WorkBuddy（本机连接，等待领取）';
+        return reply(`摘要已交给${handler} 分析，结果将作为待确认工作保存。\n工作 ID：${task.id}`);
       }
       if (command.type === 'create') {
         const space = data.workspaces.find(item => item.name === command.workspace);
