@@ -58,6 +58,18 @@ Mac 版左下角进入“连接与模型设置”。先保存配置，再点击�
 
 触发方式是 WorkBuddy 主动拉取：在 WorkBuddy 里说「处理共作待办」，或为它配置定时任务。共作必须保持运行；它不会唤起 WorkBuddy。
 
+不经过 WorkBuddy 连接器界面时，可用命令行直接调用同一组工具（定时任务和调试都用它）：
+
+```bash
+npm run gongzuo:call -- gongzuo_list_pending_work
+node scripts/gongzuo-call.cjs gongzuo_claim_work '{"taskId":"<工作 ID>"}'
+node scripts/gongzuo-call.cjs gongzuo_submit_reply --file reply.json   # {"taskId","triggerId","text"}
+```
+
+退出码：0 成功；1 工具返回错误（如共作未运行、triggerId 过期）；2 用法或参数错误。回复正文建议用 `--file` 传入，避免 shell 转义问题。
+
+2026-10-13 在运行中的开发版上实测两轮：新建 → 列出待办 → 领取 → 写回 → 重复写回被拒 → 列表显示「Agent 已回复」，持久化记录 `source=workbuddy`、`via=local-mcp`、`replyToId` 等于领取时的 triggerId。WorkBuddy 客户端内部通过已信任连接器调用的方式尚待在新会话中确认。
+
 ## CodeBuddy 和 WorkBuddy
 
 CodeBuddy Code 的 [CLI 参考](https://www.codebuddy.cn/docs/cli/cli-reference)提供 `--print`、纯文本输出和工具限制参数；[官方工作流说明](https://www.codebuddy.cn/docs/cli/common-workflows)建议只需回答的集成使用纯文本输出。[Agent SDK](https://www.codebuddy.cn/docs/cli/sdk)也支持程序化调用及已有登录凭据。Mac 版现在可以在“执行 Agent”选择 CodeBuddy。共作从主进程启动本机 CLI，使用临时目录、禁用内置工具和 MCP、不保存 CLI 会话，只读取纯文本回答。它会发送当前工作对话和适用的已确认记忆，因此只应在允许共享这些内容时启用。此前 JSON 输出的真实联调未通过；现已改用纯文本并通过本地模拟测试，**还需再做一次真实请求才能确认修复**。当前没有接入 CodeBuddy 编辑文件、运行命令或恢复会话的能力。
