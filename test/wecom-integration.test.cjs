@@ -150,3 +150,34 @@ test('企微接收诊断区分已认证与实际收到消息', async () => {
   assert.ok(bridge.lastTextFrameAt);
   assert.equal(bridge.lastTextFrameStatus, '消息格式不匹配');
 });
+
+test('契约重构后企微拒绝文案不变：无权、只读、找不到工作、空间不存在', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gongzuo-wecom-deny-'));
+  try {
+    const store = new JsonStore(path.join(dir, 'data.json'), () => ({
+      workspaces: [{ id: 'p1', name: '项目甲', type: 'project', members: [{ id: 'm1', wecomUserId: 'viewer_1', role: 'viewer', status: 'wecom' }] }],
+      tasks: [{ id: 'task-abcd', title: '报告', workspace: '项目甲', messages: [] }]
+    }));
+    await store.initialize();
+    const taskRunner = { create: async () => { throw new Error('不应创建'); }, append: async () => { throw new Error('不应追加'); } };
+    const bridge = new WecomBotBridge({ store, settingsService: { getRuntimeConfig: async () => ({ wecom: {} }) }, taskRunner });
+    const replies = [];
+    bridge.client = { replyStream: async (_f, _id, content) => { replies.push(content); } };
+    let n = 0;
+    const say = (userid, content) => bridge.handleFrame({ body: { msgid: `d-${n++}`, from: { userid }, chattype: 'single', text: { content } } });
+    await say('viewer_1', '新建 项目甲：写报告');
+    await say('viewer_1', '新建 不存在：写报告');
+    await say('viewer_1', '更新 task-abcd：已完成');
+    await say('stranger', '查看 task-abcd');
+    await say('viewer_1', '查看 zzzz');
+    await say('viewer_1', '查看 task');
+    assert.deepEqual(replies.slice(0, 5), [
+      '你尚未获得这个空间的企微协作权限。',
+      '工作空间不存在，请使用共作中的准确空间名称。',
+      '你在这个项目只有只读权限。',
+      '你尚未获得这个空间的企微参与权限。',
+      '找不到唯一的工作 ID，请使用完整 ID。'
+    ]);
+    assert.match(replies[5], /「报告」[\s\S]*gongzuo:\/\/task\/task-abcd/, '只读成员可以用短 ID 查看');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

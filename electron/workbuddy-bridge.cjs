@@ -7,6 +7,8 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { actors } = require('./contracts/policy.cjs');
+const { WorkOperations, WorkError } = require('./contracts/work-operations.cjs');
 
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_SOCKET_PATH = 100; // macOS sun_path limit is 104 bytes.
@@ -69,10 +71,12 @@ function summarizeTask(task) {
 }
 
 class WorkBuddyBridge {
-  constructor({ userDataDir, store, taskRunner, version, publish = () => {} }) {
+  constructor({ userDataDir, store, taskRunner, ops, version, publish = () => {} }) {
     this.socketPath = socketPathFor(userDataDir);
     this.infoPath = path.join(userDataDir, 'workbuddy-bridge.json');
     Object.assign(this, { store, taskRunner, version, publish });
+    this.ops = ops || new WorkOperations({ store, taskRunner });
+    this.actor = actors.workbuddy();
     this.server = null;
     this.token = null;
     this.lastClientAt = null;
@@ -125,7 +129,9 @@ class WorkBuddyBridge {
       const body = request.method === 'POST' ? await readBody(request) : {};
       send(200, await this.route(request.method, parts.slice(1), url.searchParams, body));
     } catch (error) {
-      const status = error instanceof BridgeError ? error.status : 409;
+      const status = error instanceof BridgeError ? error.status
+        : error instanceof WorkError ? ({ 'workspace-not-found': 400, 'task-not-found': 404 })[error.code] || 403
+          : 409;
       send(status, { error: String(error?.message || '共作处理失败').slice(0, 300) });
     }
   }
@@ -157,6 +163,7 @@ class WorkBuddyBridge {
       if (method === 'GET' && id && !action) {
         const task = data.tasks.find(item => item.id === requireId(id, '工作 ID'));
         if (!task) throw new BridgeError(404, '工作不存在');
+        this.ops.check(this.actor, 'work.view', data.workspaces.find(space => space.name === task.workspace));
         return {
           ...summarizeTask(task),
           goal: task.goal,
@@ -170,8 +177,7 @@ class WorkBuddyBridge {
         const goal = typeof body.goal === 'string' ? body.goal.trim() : '';
         if (!goal || goal.length > 2000) throw new BridgeError(400, '工作目标无效（1–2000 字）');
         const workspace = body.workspace == null ? data.activeWorkspace : String(body.workspace);
-        if (!data.workspaces.some(space => space.name === workspace)) throw new BridgeError(400, `工作空间不存在：${workspace}`);
-        const task = await this.taskRunner.create(goal, workspace, [], null, { agentMode: 'workbuddy' });
+        const task = await this.ops.create(this.actor, { workspace, goal, options: { agentMode: 'workbuddy' } });
         return { ...summarizeTask(task), triggerId: task.agentRun?.triggerId || null };
       }
     }

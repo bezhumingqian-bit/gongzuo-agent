@@ -1,7 +1,9 @@
 const { WSClient, generateReqId } = require('@wecom/aibot-node-sdk');
 const { matchWorkflow, workflowGoal } = require('./workflow-service.cjs');
 const { WecomSendError, recipientUserId } = require('./wecom-service.cjs');
-const { recordInboundMessage } = require('./channel-inbox.cjs');
+const { wecomBotEvent, recordWecomEvent } = require('./contracts/source-event.cjs');
+const { actors, workspaceRole } = require('./contracts/policy.cjs');
+const { WorkOperations, WorkError, findTask } = require('./contracts/work-operations.cjs');
 
 function parseCommand(text) {
   const input = String(text || '').replace(/^@[^\s]+\s*/u, '').trim();
@@ -14,19 +16,22 @@ function parseCommand(text) {
   return { type: 'help' };
 }
 
-function memberAccess(space, userId) {
-  const member = space?.members?.find(item => item.wecomUserId === userId && ['wecom', 'active'].includes(item.status));
-  return member?.role || null;
-}
+// Kept for callers/tests; the decision itself lives in contracts/policy.cjs.
+const memberAccess = (space, userId) => workspaceRole(space, actors.wecom(userId));
 
-function findTask(data, id) {
-  const matches = data.tasks.filter(task => task.id === id || task.id.startsWith(id));
-  return matches.length === 1 ? matches[0] : null;
+// WeCom wording for policy denials. Same text as before the contract refactor.
+function denialText(error, commandType) {
+  if (error.code === 'workspace-not-found') return '工作空间不存在，请使用共作中的准确空间名称。';
+  if (error.code === 'task-not-found') return '找不到唯一的工作 ID，请使用完整 ID。';
+  if (commandType === 'create') return '你尚未获得这个空间的企微协作权限。';
+  if (error.code === 'read-only') return '你在这个项目只有只读权限。';
+  return '你尚未获得这个空间的企微参与权限。';
 }
 
 class WecomBotBridge {
-  constructor({ store, settingsService, taskRunner, clientFactory = options => new WSClient(options), publish = () => {} }) {
+  constructor({ store, settingsService, taskRunner, ops, clientFactory = options => new WSClient(options), publish = () => {} }) {
     Object.assign(this, { store, settingsService, taskRunner, clientFactory, publish });
+    this.ops = ops || new WorkOperations({ store, taskRunner });
     this.client = null;
     this.status = '未配置';
     this.lastTextFrameAt = null;
@@ -92,13 +97,13 @@ class WecomBotBridge {
   }
 
   async handleFrame(frame) {
-    const body = frame?.body || {};
-    const userId = String(body.from?.userid || '');
-    const msgId = String(body.msgid || '');
-    if (!/^[A-Za-z0-9._@-]{1,64}$/.test(userId) || !msgId || msgId.length > 200) return false;
-    const text = String(body.text?.content || '');
-    const commandText = text.replace(/^@[^\s]+\s*/u, '').trim();
-    const command = parseCommand(text);
+    const event = wecomBotEvent(frame);
+    if (!event) return false;
+    const body = frame.body;
+    const userId = event.actorId;
+    const msgId = event.sourceId;
+    const commandText = event.text.replace(/^@[^\s]+\s*/u, '').trim();
+    const command = parseCommand(event.text);
     const config = await this.settingsService.getRuntimeConfig();
     const summary = command.type === 'help' ? matchWorkflow(config.workflow, userId, commandText) : null;
     const reply = async content => {
@@ -107,51 +112,32 @@ class WecomBotBridge {
     };
     let duplicate = false;
     const updatedData = await this.store.update(data => {
-      data.wecomEvents ||= [];
-      if (data.wecomEvents.some(item => item.msgId === msgId)) duplicate = true;
-      else {
-        const event = { msgId, userId, chatType: body.chattype === 'group' ? 'group' : 'single', at: new Date().toISOString() };
-        data.wecomEvents.push(event);
-        if (data.wecomEvents.length > 1000) data.wecomEvents.splice(0, data.wecomEvents.length - 1000);
-        if (event.chatType === 'single' && text.trim()) recordInboundMessage(data, {
-          channel: 'wecom', eventId: msgId, senderId: userId, conversationId: userId,
-          text, receivedAt: event.at
-        });
-      }
+      duplicate = recordWecomEvent(data, event).duplicate;
       return data;
     });
     if (duplicate) return reply('这条消息已处理。');
     this.publish(updatedData);
     if (command.type === 'help' && !summary) return reply('共作支持：\n新建 空间名称：工作目标\n更新 工作ID：进展内容\n查看 工作ID\n只有已关联到空间的企微成员可以操作该空间。');
-    const data = await this.store.read();
     const origin = { chatId: body.chattype === 'group' ? body.chatid : userId, userId, msgId, chatType: body.chattype };
+    const actor = actors.wecom(userId);
     try {
       if (summary) {
-        const space = data.workspaces.find(item => item.id === config.workflow.workspaceId);
+        const space = (await this.store.read()).workspaces.find(item => item.id === config.workflow.workspaceId);
         if (!space) return reply('规则目标空间不存在，请在共作设置中重新选择。');
         if (config.workflow.agentMode === 'built-in' && !config.model?.modelId) return reply('内置模型尚未配置；摘要未转交。');
-        const task = await this.taskRunner.create(workflowGoal(config.workflow, summary), space.name, [], origin, {
-          agentMode: config.workflow.agentMode,
-          workflow: { type: 'wecom-summary', sourceUserId: userId, sourceMsgId: msgId },
-          title: `审核企微摘要 · ${space.name}`
+        const task = await this.ops.create(actors.rule('wecom-summary', space.id, userId), {
+          workspaceId: space.id, goal: workflowGoal(config.workflow, summary), origin,
+          options: { agentMode: config.workflow.agentMode, workflow: { type: 'wecom-summary', sourceUserId: userId, sourceMsgId: msgId }, title: `审核企微摘要 · ${space.name}` }
         });
         const handler = config.workflow.agentMode !== 'workbuddy' ? '内置 Agent' : config.workbuddyAccessToken ? ' WorkBuddy' : ' WorkBuddy（本机连接，等待领取）';
         return reply(`摘要已交给${handler} 分析，结果将作为待确认工作保存。\n工作 ID：${task.id}`);
       }
       if (command.type === 'create') {
-        const space = data.workspaces.find(item => item.name === command.workspace);
-        if (!space) return reply('工作空间不存在，请使用共作中的准确空间名称。');
-        const access = memberAccess(space, userId);
-        if (!['owner', 'editor'].includes(access)) return reply('你尚未获得这个空间的企微协作权限。');
-        const task = await this.taskRunner.create(command.content, space.name, [], origin);
+        const task = await this.ops.create(actor, { workspace: command.workspace, goal: command.content, origin });
         return reply(`已创建工作。\n工作 ID：${task.id}\n${task.agentRun?.status === 'not-configured' ? 'Agent 尚未配置，请在共作中设置。' : 'Agent 结果会私聊发给你。'}`);
       }
-      const task = findTask(data, command.taskId);
-      if (!task) return reply('找不到唯一的工作 ID，请使用完整 ID。');
-      const space = data.workspaces.find(item => item.name === task.workspace);
-      const access = memberAccess(space, userId);
-      if (!access) return reply('你尚未获得这个空间的企微参与权限。');
       if (command.type === 'view') {
+        const { task } = await this.ops.view(actor, command.taskId);
         const detail = `「${task.title}」\n空间：${task.workspace}\n状态：${task.agentRun?.status || task.status || '进行中'}\n打开：gongzuo://task/${encodeURIComponent(task.id)}`;
         if (body.chattype === 'group') {
           await this.client.sendMessage(userId, { msgtype: 'markdown', markdown: { content: detail } });
@@ -159,11 +145,11 @@ class WecomBotBridge {
         }
         return reply(detail);
       }
-      if (!['owner', 'editor'].includes(access)) return reply('你在这个项目只有只读权限。');
-      await this.taskRunner.append(task.id, command.content, [], [], origin);
+      const { task } = await this.ops.append(actor, command.taskId, command.content, { origin });
       const updated = (await this.store.read()).tasks.find(item => item.id === task.id);
       return reply(`已记录到工作 ${task.id.slice(0, 8)}；${updated?.agentRun?.status === 'not-configured' ? 'Agent 尚未配置，请在共作中设置。' : 'Agent 结果会私聊发给你。'}`);
     } catch (error) {
+      if (error instanceof WorkError) return reply(denialText(error, command.type));
       return reply(`处理失败：${String(error.message || '未知错误').slice(0, 160)}`);
     }
   }

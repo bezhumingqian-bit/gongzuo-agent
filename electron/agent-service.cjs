@@ -5,8 +5,7 @@ const { callWorkBuddy } = require('./workbuddy-service.cjs');
 const path = require('node:path');
 const { callLocalAgent, callLocalAgentSession } = require('./local-agent-service.cjs');
 
-const COMPLETION_WORDS = /(已完成|做完了|处理完了|已经解决|可以发布|验收通过)/;
-const HIGH_IMPACT_WORDS = /(负责人|截止时间|延期|预算|发布到外部|删除|权限)/;
+const { classifyChannelEvent } = require('./contracts/policy.cjs');
 
 function createLocalTask({ goal, workspace }) {
   const now = new Date().toISOString();
@@ -26,18 +25,6 @@ function createLocalTask({ goal, workspace }) {
       { id: crypto.randomUUID(), title: '交付可检查的成果', status: 'todo' }
     ]
   };
-}
-
-function classifyChannelEvent(event) {
-  const text = String(event.text || '').trim();
-  if (!text) return { action: 'archive', reason: 'empty' };
-  if (HIGH_IMPACT_WORDS.test(text)) {
-    return { action: 'suggest', reason: 'high-impact-field', suggestion: '请负责人确认后更新任务' };
-  }
-  if (COMPLETION_WORDS.test(text)) {
-    return { action: 'auto-update', reason: 'explicit-completion', patch: { progressConfirmed: true } };
-  }
-  return { action: 'archive', reason: 'context-only' };
 }
 
 class AgentService {

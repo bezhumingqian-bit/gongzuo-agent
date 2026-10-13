@@ -3,7 +3,10 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { JsonStore } = require('./store.cjs');
 const { createSeed } = require('./seed.cjs');
-const { AgentService, classifyChannelEvent } = require('./agent-service.cjs');
+const { AgentService } = require('./agent-service.cjs');
+const { actors, classifyChannelEvent } = require('./contracts/policy.cjs');
+const { channelIngestEvent, hasChannelEvent, recordChannelEvent } = require('./contracts/source-event.cjs');
+const { WorkOperations } = require('./contracts/work-operations.cjs');
 const { memorySeed, createMemory, extractCandidate } = require('./memory-service.cjs');
 const { SettingsService } = require('./settings-service.cjs');
 const { testConnection } = require('./connection-service.cjs');
@@ -26,6 +29,7 @@ let taskRunner;
 let wecomDelivery;
 let wecomBot;
 let workbuddyBridge;
+let workOps;
 let pendingTaskLink = null;
 const agent = new AgentService();
 
@@ -189,14 +193,14 @@ function registerIpc() {
     const goal = assertString(input.goal, '工作目标');
     const current = await store.read();
     const workspace = current.workspaces.some(item => item.name === input.workspace) ? input.workspace : current.activeWorkspace;
-    return taskRunner.create(goal, workspace, input.documentIds || []);
+    return workOps.create(actors.local(), { workspace, goal, documentIds: input.documentIds || [] });
   });
 
   ipcMain.handle('tasks:append-message', async (event, input = {}) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     const taskId = assertString(input.taskId, '任务 ID', 100);
     const text = assertString(input.text, '消息');
-    const message = await taskRunner.append(taskId, text, input.mentions || [], input.documentIds || []);
+    const { message } = await workOps.append(actors.local(), taskId, text, { mentions: input.mentions || [], documentIds: input.documentIds || [] });
     if (message.mentions?.length) await wecomDelivery.sendMentions(taskId, message.id);
     return (await store.read()).tasks.find(item => item.id === taskId)?.messages.find(item => item.id === message.id) || message;
   });
@@ -390,21 +394,14 @@ function registerIpc() {
 
   ipcMain.handle('channel:ingest', async (event, input = {}) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
-    const normalized = {
-      id: crypto.randomUUID(),
-      externalId: assertString(input.externalId || crypto.randomUUID(), '外部消息 ID', 160),
-      source: assertString(input.source, '消息来源', 40),
-      sender: assertString(input.sender, '发送者', 120),
-      text: assertString(input.text, '消息'),
-      taskId: assertString(input.taskId, '任务 ID', 100),
-      occurredAt: input.occurredAt || new Date().toISOString()
-    };
-    const decision = classifyChannelEvent(normalized);
+    const { event: sourceEvent, taskId } = channelIngestEvent(input, () => crypto.randomUUID());
+    const decision = classifyChannelEvent(sourceEvent);
     const data = await store.update(draft => {
-      if (draft.channelEvents.some(item => item.externalId === normalized.externalId && item.source === normalized.source)) return draft;
-      const task = draft.tasks.find(item => item.id === normalized.taskId);
+      // Order kept from before: a replayed event is a no-op even if its task is gone.
+      if (hasChannelEvent(draft, sourceEvent)) return draft;
+      const task = draft.tasks.find(item => item.id === taskId);
       if (!task) throw new Error('任务不存在');
-      draft.channelEvents.push({ ...normalized, decision });
+      recordChannelEvent(draft, sourceEvent, taskId, decision, crypto.randomUUID());
       task.updatedAt = new Date().toISOString();
       if (decision.action === 'auto-update') task.progressConfirmed = true;
       if (decision.action === 'suggest') task.needsMe = true;
@@ -504,10 +501,11 @@ app.whenReady().then(async () => {
   }
   agent.sessionsRoot = path.join(app.getPath('userData'), 'agent-sessions');
   taskRunner = new TaskRunner({ store, settingsService, personalMemoryStore, teamMemoryStore, documentService, agent, publish: publishData });
-  wecomBot = new WecomBotBridge({ store, settingsService, taskRunner, publish: publishData });
+  workOps = new WorkOperations({ store, taskRunner });
+  wecomBot = new WecomBotBridge({ store, settingsService, taskRunner, ops: workOps, publish: publishData });
   wecomDelivery = new WecomDelivery({ store, settingsService, publish: publishData, send: (config, userId, text) => sendViaWecom(config, userId, text, wecomBot) });
   taskRunner.onAgentAnswer = event => wecomBot.sendAgentAnswer(event);
-  workbuddyBridge = new WorkBuddyBridge({ userDataDir: app.getPath('userData'), store, taskRunner, version: app.getVersion() });
+  workbuddyBridge = new WorkBuddyBridge({ userDataDir: app.getPath('userData'), store, taskRunner, ops: workOps, version: app.getVersion() });
   await taskRunner.markInterrupted();
   await wecomDelivery.markInterrupted();
   registerIpc();

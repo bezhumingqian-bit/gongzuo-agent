@@ -4,6 +4,7 @@ const { getApplicableMemories } = require('./memory-service.cjs');
 const { resolveMentions } = require('./mention-service.cjs');
 const { asksToReadWecomInbox, wecomInboxForAgent } = require('./channel-inbox.cjs');
 const { conversationInput } = require('./connection-service.cjs');
+const { mayUsePersonalMemory } = require('./contracts/policy.cjs');
 
 // WorkBuddy has two transports: the official Open API (needs an OAuth token) and
 // the local MCP hand-off, where WorkBuddy pulls queued work from this app.
@@ -196,9 +197,10 @@ class TaskRunner {
     const workspaceId = data.workspaces.find(item => item.name === task.workspace)?.id;
     const [personal, team] = await Promise.all([this.personalMemoryStore.read(), this.teamMemoryStore.read()]);
     const triggerMessage = task.messages.find(item => item.id === triggerId);
-    const fromWecom = Boolean(triggerMessage?.wecomOrigin);
-    const readWecomInbox = !fromWecom && asksToReadWecomInbox(triggerMessage?.text, messages.slice(0, -1), task.title);
-    const memory = getApplicableMemories(fromWecom ? [] : personal.items, team.items, workspaceId);
+    const personalAllowed = mayUsePersonalMemory(triggerMessage?.wecomOrigin);
+    // The local inbox is the local user's; colleagues writing in via WeCom cannot read it.
+    const readWecomInbox = personalAllowed && asksToReadWecomInbox(triggerMessage?.text, messages.slice(0, -1), task.title);
+    const memory = getApplicableMemories(personalAllowed ? personal.items : [], team.items, workspaceId);
     if (/企微|企业微信|机器人|长连接/u.test(`${task.title} ${triggerMessage?.text || ''}`) || readWecomInbox) {
       const recentWecomEvent = (data.wecomEvents || []).at(-1);
       const inbox = (data.inboundMessages || []).filter(item => item.channel === 'wecom' && item.text);

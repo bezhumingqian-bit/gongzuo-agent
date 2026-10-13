@@ -97,10 +97,20 @@ Mac 版可继续本机运行交互与个人配置。要求全天接收消息、�
 
 ## 与现有代码的迁移顺序
 
-1. **固定数据和权限契约。** 从 `main.cjs`、`task-runner.cjs` 和 `wecom-bot-service.cjs` 中抽出来源事件、工作操作与审批边界；保留现有 IPC 行为。为已有企微消息补适配器，但不要改变已存数据的含义。
+1. **固定数据和权限契约。**（2026-10-13 已完成首版：`electron/contracts/` 下 `source-event.cjs`、`policy.cjs`、`work-operations.cjs`；见下方「当前契约」。） 从 `main.cjs`、`task-runner.cjs` 和 `wecom-bot-service.cjs` 中抽出来源事件、工作操作与审批边界；保留现有 IPC 行为。为已有企微消息补适配器，但不要改变已存数据的含义。
 2. **实现模块目录。** 把 `demo/app.js` 中写死的 `homeModuleCatalog`、固定应用预览和一条 `workflow` 规则逐步改为受控清单；先支持个人主页卡片和规则版本，再开放团队发布。
 3. **实现对话定制。** AI 输出草案，校验器生成可预览配置；先只用现有工作、空间资料和企微收件数据。预览、保存和实际运行状态分别显示。
 4. **建立接入适配器。** 先验证「大圆 → 企微机器人 → 来源记录 → 待确认工作」；随后接微盘文件、飞书和邮件。每项接入单独做权限、断线和重复投递测试。
 5. **迁往协作服务。** 在组织身份、空间授权和审计就位后，再开放跨设备共享模块、团队记忆与企业数据库数据集。
 
 验收标准：新增一个数据来源、一个 Agent 或一个主页模块，不修改其他供应商的实现；用户能用一句话生成可预览的个人模块，确认后才生效；未授权字段不能被查询，失效连接不会被显示成可用；重复事件不会重复创建工作，所有自动更新可追溯并可撤销。
+
+## 当前契约（第 1 步落地）
+
+| 文件 | 内容 | 使用方 |
+| --- | --- | --- |
+| `contracts/source-event.cjs` | `SourceEvent` 标准字段与去重键 `source:connectionId:sourceId`；企微机器人帧与 `channel:ingest` 的适配；按旧集合（`wecomEvents`、`inboundMessages`、`channelEvents`）原样落库 | 企微机器人、IPC 渠道接入 |
+| `contracts/policy.cjs` | 操作者（本机用户、企微成员、WorkBuddy、摘要规则）、空间角色与 `work.view/create/append` 授权；企微发起的工作不带个人记忆；字段风险（需确认 / 可撤销）与渠道消息判定 | 全部入口、TaskRunner |
+| `contracts/work-operations.cjs` | 唯一的新建、追加、查看入口：解析空间 → 授权 → 交给 TaskRunner；错误码 `workspace-not-found / task-not-found / no-access / read-only` 由各入口映射为自己的文案 | 本机 IPC、企微机器人、WorkBuddy 桥接 |
+
+已存数据的结构和含义未改；企微回复文案逐字保持（有回归测试）。单机语义：本机用户拥有全部本机空间，WorkBuddy 作为本机用户的代理，企微成员只能操作显式关联的空间，摘要规则只能在配置的空间建工作。迁往服务端时，替换 `workspaceRole` 的身份来源即可，入口代码不变。
