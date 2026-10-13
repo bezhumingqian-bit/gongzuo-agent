@@ -109,7 +109,7 @@ function registerIpc() {
     if (!['model', 'agent', 'wecom'].includes(kind)) throw new Error('连接类型无效');
     const config = await settingsService.getRuntimeConfig();
     let result;
-    if (kind === 'agent' && config.agent?.mode === 'workbuddy' && !config.workbuddyAccessToken) {
+    if (kind === 'agent' && config.agent?.mode === 'workbuddy' && require('./workbuddy-transport.cjs').transportOf(config) === 'handoff') {
       const bridge = workbuddyBridge?.status;
       result = !bridge?.listening
         ? { ok: false, message: '共作本机连接未启动，请重启共作' }

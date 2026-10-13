@@ -11,6 +11,8 @@ const { actors } = require('./contracts/policy.cjs');
 const { WorkOperations, WorkError } = require('./contracts/work-operations.cjs');
 
 const MAX_BODY_BYTES = 256 * 1024;
+const MAX_WAIT_MS = 280 * 1000;
+const FILE_EXTENSIONS = /\.(pdf|docx|doc|txt|md|csv|xlsx|xls|pptx|ppt)$/i;
 const MAX_SOCKET_PATH = 100; // macOS sun_path limit is 104 bytes.
 const ID_PATTERN = /^[A-Za-z0-9-]{4,100}$/;
 
@@ -56,6 +58,22 @@ function requireId(value, label) {
   return value;
 }
 
+// Files a local WorkBuddy produced and wants to return with its reply.
+async function validateReplyFiles(files) {
+  if (files == null) return [];
+  if (!Array.isArray(files) || files.length > 10) throw new BridgeError(400, '一次最多附带 10 个文件');
+  const checked = [];
+  for (const file of files) {
+    if (typeof file !== 'string' || !path.isAbsolute(file) || file.length > 1000) throw new BridgeError(400, '文件路径必须是绝对路径');
+    if (!FILE_EXTENSIONS.test(file)) throw new BridgeError(400, `不支持的文件格式：${path.basename(file)}`);
+    let stat;
+    try { stat = await fs.stat(file); } catch { throw new BridgeError(400, `文件不存在：${path.basename(file)}`); }
+    if (!stat.isFile()) throw new BridgeError(400, `不是普通文件：${path.basename(file)}`);
+    checked.push(file);
+  }
+  return checked;
+}
+
 function summarizeTask(task) {
   return {
     taskId: task.id,
@@ -91,6 +109,7 @@ class WorkBuddyBridge {
     this.token = crypto.randomBytes(32).toString('base64url');
     await fs.rm(this.socketPath, { force: true });
     const server = http.createServer((request, response) => this.handle(request, response));
+    server.requestTimeout = MAX_WAIT_MS + 30000;
     await new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(this.socketPath, () => { server.off('error', reject); resolve(); });
@@ -144,12 +163,22 @@ class WorkBuddyBridge {
     }
     if (resource === 'handoffs') {
       if (method === 'GET' && !id) return { items: await this.taskRunner.listHandoffs() };
+      if (method === 'GET' && id === 'wait') {
+        // Long poll: return as soon as unclaimed work exists, or after the timeout.
+        const timeout = Math.min(Math.max(Number(query.get('timeoutMs')) || 100000, 1000), MAX_WAIT_MS);
+        const until = Date.now() + timeout;
+        for (;;) {
+          const items = (await this.taskRunner.listHandoffs()).filter(item => !item.claimedAt);
+          if (items.length || Date.now() >= until || !this.server) return { items, timedOut: !items.length };
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
       const taskId = requireId(id, '工作 ID');
       if (method === 'POST' && action === 'claim') return this.taskRunner.claimHandoff(taskId);
       if (method === 'POST' && action === 'reply') {
         const triggerId = requireId(body.triggerId, '待处理消息 ID');
         if (typeof body.text !== 'string') throw new BridgeError(400, '回复内容无效');
-        return this.taskRunner.submitHandoffReply(taskId, triggerId, body.text);
+        return this.taskRunner.submitHandoffReply(taskId, triggerId, body.text, await validateReplyFiles(body.files));
       }
     }
     if (resource === 'works') {

@@ -127,3 +127,41 @@ test('桥接拒绝错误令牌，文件与套接字仅当前用户可读写，�
     await assert.rejects(ctx.tool('gongzuo_connection_test', {}), /没有在运行/);
   } finally { await ctx.cleanup(); }
 });
+
+test('值守：等待接口在新工作出现时立即返回，超时返回暂无；已领取的不再返回', async () => {
+  const ctx = await setup();
+  try {
+    assert.match(await ctx.tool('gongzuo_wait_for_work', { timeoutSeconds: 1 }), /暂无新工作/);
+    const started = Date.now();
+    const waiting = ctx.tool('gongzuo_wait_for_work', { timeoutSeconds: 10 });
+    setTimeout(() => { ctx.runner.create('值守测试', '产品团队'); }, 300);
+    const result = await waiting;
+    assert.match(result, /值守测试/);
+    assert.ok(Date.now() - started < 5000, '新工作出现后应尽快返回');
+    const taskId = /taskId: (\S+)/.exec(result)[1];
+    await ctx.tool('gongzuo_claim_work', { taskId });
+    assert.match(await ctx.tool('gongzuo_wait_for_work', { timeoutSeconds: 1 }), /暂无新工作/, '已领取的工作不重复派发');
+  } finally { await ctx.cleanup(); }
+});
+
+test('回复可附带本机文件：校验格式与存在性，存入该工作所属空间资料', async () => {
+  const uploads = [];
+  const ctx = await setup();
+  ctx.runner.documentService.upload = async (workspaceId, paths) => { uploads.push({ workspaceId, paths }); return paths.map((file, index) => ({ id: `doc-${index}`, name: path.basename(file) })); };
+  try {
+    const file = path.join(ctx.directory, '周报.md');
+    await fs.writeFile(file, '# 周报');
+    const created = await ctx.runner.create('写周报', '产品团队');
+    await ctx.runner.queues.get(created.id);
+    const triggerId = (await ctx.store.read()).tasks[0].agentRun.triggerId;
+    await assert.rejects(ctx.tool('gongzuo_submit_reply', { taskId: created.id, triggerId, text: '见附件', files: ['relative.md'] }), /绝对路径/);
+    await assert.rejects(ctx.tool('gongzuo_submit_reply', { taskId: created.id, triggerId, text: '见附件', files: [path.join(ctx.directory, 'x.exe')] }), /不支持的文件格式/);
+    await assert.rejects(ctx.tool('gongzuo_submit_reply', { taskId: created.id, triggerId, text: '见附件', files: [path.join(ctx.directory, '没有.md')] }), /文件不存在/);
+    assert.match(await ctx.tool('gongzuo_submit_reply', { taskId: created.id, triggerId, text: '见附件', files: [file] }), /1 个文件已存入空间资料：周报\.md/);
+    assert.deepEqual(uploads, [{ workspaceId: 'product', paths: [file] }]);
+    const reply = (await ctx.store.read()).tasks[0].messages.at(-1);
+    assert.deepEqual(reply.artifacts, [{ id: 'doc-0', name: '周报.md' }]);
+    assert.equal(reply.pendingFiles, undefined);
+    await fs.access(file);
+  } finally { await ctx.cleanup(); }
+});

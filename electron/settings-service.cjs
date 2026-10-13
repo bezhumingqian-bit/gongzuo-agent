@@ -1,5 +1,6 @@
 const { JsonStore } = require('./store.cjs');
 const { defaultWorkflow, normalizeWorkflow } = require('./workflow-service.cjs');
+const { TRANSPORTS } = require('./workbuddy-transport.cjs');
 
 const defaultSettings = () => ({
   model: { provider: 'openai', modelId: '', baseUrl: 'https://api.openai.com/v1' },
@@ -47,6 +48,8 @@ function normalizeSettings(input = {}) {
     throw new Error('官方模型提供方只能使用对应的官方接口地址；其他服务请选择兼容模式');
   }
   const agentEndpoint = endpoint(input.agent?.endpoint, 'Agent 地址', true);
+  const workbuddyTransport = input.agent?.workbuddyTransport;
+  if (workbuddyTransport != null && workbuddyTransport !== '' && !TRANSPORTS.includes(workbuddyTransport)) throw new Error('WorkBuddy 连接方式无效');
   if (mode === 'external' && !agentEndpoint) throw new Error('请填写外部 Agent 地址');
   const organizationId = String(input.wecom?.organizationId ?? '').trim();
   const applicationId = String(input.wecom?.applicationId ?? '').trim();
@@ -60,7 +63,7 @@ function normalizeSettings(input = {}) {
   if (!['mentions','authorized'].includes(messageScope)) throw new Error('企业微信消息范围无效');
   return {
     model: { provider, modelId, baseUrl },
-    agent: { mode, endpoint: agentEndpoint },
+    agent: { mode, endpoint: agentEndpoint, ...(TRANSPORTS.includes(workbuddyTransport) ? { workbuddyTransport } : {}) },
     wecom: { organizationId, applicationId, recipientUserId, botId, messageScope },
     workflow: normalizeWorkflow(input.workflow)
   };

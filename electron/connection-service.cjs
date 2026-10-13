@@ -119,7 +119,11 @@ async function testConnection(kind, config, fetchImpl = fetch, codeBuddyTest) {
     return { ok: true, message: '模型已返回内容' };
   }
   if (kind === 'agent') {
-    if (config.agent?.mode === 'workbuddy') return require('./workbuddy-service.cjs').checkWorkBuddy(config, fetchImpl);
+    if (config.agent?.mode === 'workbuddy') {
+      return require('./workbuddy-transport.cjs').transportOf(config) === 'cloud'
+        ? require('./workbuddy-cloud.cjs').checkWorkBuddyCloud(config, fetchImpl)
+        : require('./workbuddy-service.cjs').checkWorkBuddy(config, fetchImpl);
+    }
     if (config.agent?.mode === 'codebuddy') {
       const test = codeBuddyTest || require('./codebuddy-service.cjs').testCodeBuddy;
       return test();

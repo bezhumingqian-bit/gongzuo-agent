@@ -129,7 +129,8 @@ class WecomBotBridge {
           workspaceId: space.id, goal: workflowGoal(config.workflow, summary), origin,
           options: { agentMode: config.workflow.agentMode, workflow: { type: 'wecom-summary', sourceUserId: userId, sourceMsgId: msgId }, title: `审核企微摘要 · ${space.name}` }
         });
-        const handler = config.workflow.agentMode !== 'workbuddy' ? '内置 Agent' : config.workbuddyAccessToken ? ' WorkBuddy' : ' WorkBuddy（本机连接，等待领取）';
+        const transport = require('./workbuddy-transport.cjs').transportOf(config);
+        const handler = config.workflow.agentMode !== 'workbuddy' ? '内置 Agent' : transport === 'handoff' ? ' WorkBuddy（本机连接，等待领取）' : transport === 'cloud' ? ' WorkBuddy 云端任务' : ' WorkBuddy';
         return reply(`摘要已交给${handler} 分析，结果将作为待确认工作保存。\n工作 ID：${task.id}`);
       }
       if (command.type === 'create') {

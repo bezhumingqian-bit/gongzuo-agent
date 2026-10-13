@@ -8,8 +8,9 @@ const { mayUsePersonalMemory } = require('./contracts/policy.cjs');
 
 // WorkBuddy has two transports: the official Open API (needs an OAuth token) and
 // the local MCP hand-off, where WorkBuddy pulls queued work from this app.
-const usesWorkBuddyOpenApi = config => config?.agent?.mode === 'workbuddy' && Boolean(config.workbuddyAccessToken);
-const usesWorkBuddyHandoff = config => config?.agent?.mode === 'workbuddy' && !config.workbuddyAccessToken;
+const { transportOf } = require('./workbuddy-transport.cjs');
+const usesWorkBuddyOpenApi = config => config?.agent?.mode === 'workbuddy' && transportOf(config) === 'localassistant';
+const usesWorkBuddyHandoff = config => config?.agent?.mode === 'workbuddy' && transportOf(config) === 'handoff';
 
 function messagesThroughTrigger(messages, triggerId) {
   const triggerIndex = messages.findIndex(item => item.id === triggerId && item.role === 'user');
@@ -258,10 +259,37 @@ class TaskRunner {
         return;
       }
       if (!prepared) return;
-      const answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory);
+      let lastProgressAt = 0;
+      const onProgress = ({ text, step } = {}) => {
+        const now = Date.now();
+        if (now - lastProgressAt < 1500) return;
+        lastProgressAt = now;
+        this.setRunStatus(taskId, { status: 'running', triggerId, progress: String(step ? `正在：${step}` : (text || '').slice(-200)).slice(0, 240) }).catch(() => {});
+      };
+      const answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory, { onProgress });
+      if (answer?.pendingFiles) await this.attachAnswerFiles(prepared.task.workspace, answer);
       await this.recordAnswer(taskId, triggerId, answer);
     } catch (error) {
       await this.setRunStatus(taskId, { status: 'failed', triggerId, message: 'Agent 执行中断，请重试' });
+    }
+  }
+
+  // Files produced by an Agent become space documents so the team keeps them.
+  async attachAnswerFiles(workspace, answer) {
+    const files = answer.pendingFiles || [];
+    const directory = answer.pendingFilesDirectory;
+    delete answer.pendingFiles;
+    delete answer.pendingFilesDirectory;
+    try {
+      const data = await this.store.read();
+      const workspaceId = data.workspaces.find(item => item.name === workspace)?.id;
+      if (!workspaceId || !files.length || typeof this.documentService?.upload !== 'function') return;
+      const saved = await this.documentService.upload(workspaceId, files.slice(0, 10).map(file => file.path));
+      answer.artifacts = saved.map(item => ({ id: item.id, name: item.name }));
+    } catch (error) {
+      answer.text = `${answer.text}\n\n（生成的文件未能存入空间资料：${String(error?.message || '未知错误').slice(0, 120)}）`;
+    } finally {
+      if (directory) await require('node:fs/promises').rm(directory, { recursive: true, force: true }).catch(() => {});
     }
   }
 
@@ -330,7 +358,7 @@ class TaskRunner {
     };
   }
 
-  async submitHandoffReply(taskId, triggerId, text) {
+  async submitHandoffReply(taskId, triggerId, text, files = []) {
     const reply = String(text || '').trim();
     if (!reply) throw new Error('回复内容不能为空');
     if (reply.length > 50000) throw new Error('回复不能超过 50000 字');
@@ -339,8 +367,12 @@ class TaskRunner {
     if (task.agentRun?.status !== 'awaiting-workbuddy') throw new Error('这项工作当前没有等待 WorkBuddy 回复的消息');
     if (task.agentRun.triggerId !== triggerId) throw new Error('这条消息已不是最新的待处理消息；请重新读取工作后再回复');
     const answer = { id: crypto.randomUUID(), role: 'assistant', text: reply, createdAt: new Date().toISOString(), source: 'workbuddy', via: 'local-mcp' };
+    if (files.length) {
+      answer.pendingFiles = files.map(file => ({ path: file }));
+      await this.attachAnswerFiles(task.workspace, answer);
+    }
     await this.recordAnswer(taskId, triggerId, answer);
-    return { taskId, messageId: answer.id };
+    return { taskId, messageId: answer.id, files: answer.artifacts || [] };
   }
 
   async markInterrupted() {

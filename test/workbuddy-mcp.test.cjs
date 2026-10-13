@@ -4,13 +4,13 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { response, TOOLS, bridgeCandidates } = require('../integrations/workbuddy/gongzuo-mcp.cjs');
 
-const TOOL_NAMES = ['gongzuo_connection_test', 'gongzuo_list_pending_work', 'gongzuo_claim_work', 'gongzuo_submit_reply', 'gongzuo_list_works', 'gongzuo_get_work', 'gongzuo_create_work'];
+const TOOL_NAMES = ['gongzuo_connection_test', 'gongzuo_list_pending_work', 'gongzuo_wait_for_work', 'gongzuo_claim_work', 'gongzuo_submit_reply', 'gongzuo_list_works', 'gongzuo_get_work', 'gongzuo_create_work'];
 
 test('WorkBuddy MCP 暴露共作工作工具；只读工具带只读标注', async () => {
   const list = await response({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   assert.deepEqual(list.result.tools.map(tool => tool.name), TOOL_NAMES);
   const readOnly = TOOLS.filter(tool => tool.annotations?.readOnlyHint).map(tool => tool.name);
-  assert.deepEqual(readOnly, ['gongzuo_connection_test', 'gongzuo_list_pending_work', 'gongzuo_list_works', 'gongzuo_get_work']);
+  assert.deepEqual(readOnly, ['gongzuo_connection_test', 'gongzuo_list_pending_work', 'gongzuo_wait_for_work', 'gongzuo_list_works', 'gongzuo_get_work']);
   for (const tool of TOOLS) assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(await response({ jsonrpc: '2.0', method: 'notifications/initialized' }), null);
   const unknown = await response({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'rm_rf', arguments: {} } });
