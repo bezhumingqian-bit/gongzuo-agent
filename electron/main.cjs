@@ -17,13 +17,13 @@ const { testConnection } = require('./connection-service.cjs');
 const { readWorkBuddyReply } = require('./workbuddy-service.cjs');
 const { modelPortalUrl, WORKBUDDY_PORTAL } = require('./provider-links.cjs');
 const { DocumentService } = require('./document-service.cjs');
-const { createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, removePendingProjectMember, updatePendingProjectMemberRole, migrateLegacyWorkspaceMembers } = require('./workspace-service.cjs');
+const { createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, decideJoinRequest, removePendingProjectMember, updatePendingProjectMemberRole, migrateLegacyWorkspaceMembers } = require('./workspace-service.cjs');
 const { TaskRunner } = require('./task-runner.cjs');
 const { WecomDelivery, recipientUserId, fetchVisibleMembers, sendViaWecom } = require('./wecom-service.cjs');
 const { WecomBotBridge } = require('./wecom-bot-service.cjs');
 const { WorkBuddyBridge } = require('./workbuddy-bridge.cjs');
 const { WorkBuddyOAuth } = require('./workbuddy-oauth.cjs');
-const { notifyMember, reachability } = require('./channel-router.cjs');
+const { notifyMember, reachability, botContacts } = require('./channel-router.cjs');
 
 let mainWindow;
 let store;
@@ -103,7 +103,8 @@ function registerIpc() {
     const data = await store.read();
     const runtime = await settingsService.getRuntimeConfig();
     const memberReach = {};
-    for (const space of data.workspaces || []) for (const member of space.members || []) memberReach[member.id] = reachability(member, runtime, wecomBot);
+    const contacts = botContacts(data);
+    for (const space of data.workspaces || []) for (const member of space.members || []) memberReach[member.id] = reachability(member, runtime, wecomBot, contacts);
     return { ...await settingsService.getPublic(), memberReach, workbuddyAuth: await workbuddyAuth.status(), workbuddyBridge: workbuddyBridge?.status || { listening: false, lastClientAt: null }, wecomBotStatus: wecomBot?.status || '未配置', wecomBotLastTextFrameAt: wecomBot?.lastTextFrameAt || null, wecomBotLastTextFrameStatus: wecomBot?.lastTextFrameStatus || '尚未收到', wecomRecentInbound: (data.wecomEvents || []).slice(-5).reverse().map(({ userId, chatType, at }) => ({ userId, chatType, at })) };
   });
 
@@ -317,6 +318,22 @@ function registerIpc() {
       return draft;
     });
     publishData(data);
+    return data;
+  });
+
+  ipcMain.handle('workspace:decide-join', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    let outcome;
+    const data = await store.update(draft => {
+      outcome = decideJoinRequest(draft, { requestId: assertString(input.requestId, '申请', 100), approve: input.approve === true, name: input.name, role: input.role || 'editor' });
+      return draft;
+    });
+    publishData(data);
+    // They messaged the bot to apply, so the bot may answer them now.
+    const text = outcome.approved
+      ? `你已加入共作「${outcome.space.name}」。之后有人在共作 @ 你、把工作指派给你，我会在这里通知你。\n也可以直接发：新建 ${outcome.space.name}：工作目标`
+      : `你加入「${outcome.space.name}」的申请没有通过；如有疑问请联系空间负责人。`;
+    wecomBot?.sendText(outcome.request.userId, text).catch(() => {});
     return data;
   });
 
@@ -546,6 +563,7 @@ app.whenReady().then(async () => {
   workbuddyAuth = new WorkBuddyOAuth({ settingsService, openExternal: url => shell.openExternal(url) });
   settingsService.workbuddyTokenProvider = () => workbuddyAuth.getAccessToken();
   settingsService.cloudagentKeyFallback = require('./cloudagent.cjs').readKeychainKey;
+  settingsService.wecomBotSecretFallback = () => require('./workbuddy-oauth.cjs').readKeychain('cn.gongzuo.wecom.bot-secret');
   documentService = new DocumentService(
     path.join(app.getPath('userData'), 'documents.json'),
     path.join(app.getPath('userData'), 'documents')
@@ -558,7 +576,7 @@ app.whenReady().then(async () => {
   taskRunner = new TaskRunner({ store, settingsService, personalMemoryStore, teamMemoryStore, documentService, agent, publish: publishData });
   workOps = new WorkOperations({ store, taskRunner });
   wecomBot = new WecomBotBridge({ store, settingsService, taskRunner, ops: workOps, publish: publishData });
-  wecomDelivery = new WecomDelivery({ store, settingsService, publish: publishData, send: (config, userId, text) => sendViaWecom(config, userId, text, wecomBot), notify: (config, member, text) => notifyMember(config, member, text, { bot: wecomBot }) });
+  wecomDelivery = new WecomDelivery({ store, settingsService, publish: publishData, send: (config, userId, text) => sendViaWecom(config, userId, text, wecomBot), notify: async (config, member, text) => notifyMember(config, member, text, { bot: wecomBot, contacts: botContacts(await store.read()) }) });
   taskRunner.onAgentAnswer = event => wecomBot.sendAgentAnswer(event);
   workbuddyBridge = new WorkBuddyBridge({ userDataDir: app.getPath('userData'), store, taskRunner, ops: workOps, version: app.getVersion() });
   await taskRunner.markInterrupted();

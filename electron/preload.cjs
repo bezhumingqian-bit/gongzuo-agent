@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('gongzuo', Object.freeze({
   addProjectMember: input => ipcRenderer.invoke('workspace:add-member', input),
   linkWecomProjectMember: input => ipcRenderer.invoke('workspace:link-wecom-member', input),
   linkFeishuProjectMember: input => ipcRenderer.invoke('workspace:link-feishu-member', input),
+  decideJoinRequest: input => ipcRenderer.invoke('workspace:decide-join', input),
   removePendingProjectMember: input => ipcRenderer.invoke('workspace:remove-pending-member', input),
   updatePendingProjectMemberRole: input => ipcRenderer.invoke('workspace:update-pending-role', input),
   ingestChannelEvent: event => ipcRenderer.invoke('channel:ingest', event),

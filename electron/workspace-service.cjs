@@ -64,8 +64,10 @@ function linkWecomProjectMember(data, input, actorId = LOCAL_USER_ID) {
   if (!workspace) throw new Error('团队或项目空间不存在');
   if (workspaceType(workspace) === 'project' && workspace.createdBy !== actorId) throw new Error('只有空间创建者可以关联企微成员');
   const userId = recipientUserId(input.userId);
-  const directoryMember = (data.wecomDirectory?.members || []).find(item => item.userId === userId);
-  if (!directoryMember) throw new Error('请先同步企微可见成员，再从目录中选择同事');
+  // Without a synced directory (no self-built app), the owner types the name.
+  const directoryMember = (data.wecomDirectory?.members || []).find(item => item.userId === userId)
+    || (String(input.name || '').trim() ? { name: String(input.name).trim().slice(0, 40) } : null);
+  if (!directoryMember) throw new Error('请填写同事姓名和企微 UserID');
   if ((workspace.members || []).some(item => item.wecomUserId === userId)) throw new Error('该企微成员已在项目中');
   const role = input.role || 'editor';
   if (!['viewer', 'editor'].includes(role)) throw new Error('项目权限无效');
@@ -100,6 +102,38 @@ function linkFeishuProjectMember(data, input, actorId = LOCAL_USER_ID) {
   return member;
 }
 
+// ---- 加入申请：colleague sends the bot "加入 空间名", owner confirms here ----
+
+function requestToJoin(data, { userId, workspace, name }) {
+  const space = data.workspaces.find(item => item.name === workspace && ['project', 'team'].includes(workspaceType(item)));
+  if (!space) return { status: 'workspace-not-found' };
+  if ((space.members || []).some(member => member.wecomUserId === userId && member.status !== 'pending')) return { status: 'already-member', space };
+  data.joinRequests ||= [];
+  const existing = data.joinRequests.find(item => item.userId === userId && item.workspaceId === space.id);
+  if (existing) { if (name) existing.name = name; return { status: 'already-requested', space }; }
+  data.joinRequests.push({ id: crypto.randomUUID(), userId, workspaceId: space.id, name: name || '', at: new Date().toISOString() });
+  if (data.joinRequests.length > 200) data.joinRequests.splice(0, data.joinRequests.length - 200);
+  return { status: 'requested', space };
+}
+
+function decideJoinRequest(data, { requestId, approve, name, role = 'editor' }, actorId = LOCAL_USER_ID) {
+  const index = (data.joinRequests || []).findIndex(item => item.id === requestId);
+  if (index < 0) throw new Error('加入申请不存在或已处理');
+  const request = data.joinRequests[index];
+  const space = data.workspaces.find(item => item.id === request.workspaceId);
+  if (!space) { data.joinRequests.splice(index, 1); throw new Error('空间已不存在'); }
+  if (workspaceType(space) === 'project' && space.createdBy !== actorId) throw new Error('只有空间创建者可以处理加入申请');
+  data.joinRequests.splice(index, 1);
+  if (!approve) return { approved: false, request, space };
+  if (!['viewer', 'editor'].includes(role)) throw new Error('项目权限无效');
+  const displayName = String(name || request.name || '').trim().slice(0, 40) || request.userId;
+  space.members ||= [];
+  let member = space.members.find(item => item.wecomUserId === request.userId);
+  if (member) Object.assign(member, { name: displayName, role, status: 'wecom' });
+  else { member = { id: crypto.randomUUID(), name: displayName, wecomUserId: request.userId, role, status: 'wecom', addedAt: new Date().toISOString() }; space.members.push(member); }
+  return { approved: true, request, space, member };
+}
+
 function removePendingProjectMember(data, input, actorId = LOCAL_USER_ID) {
   const workspace = data.workspaces.find(space => space.id === input.workspaceId && ['project', 'team'].includes(workspaceType(space)));
   if (!workspace) throw new Error('团队或项目空间不存在');
@@ -121,4 +155,4 @@ function updatePendingProjectMemberRole(data, input, actorId = LOCAL_USER_ID) {
   return member;
 }
 
-module.exports = { LOCAL_USER_ID, workspaceType, migrateLegacyWorkspaceMembers, createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, removePendingProjectMember, updatePendingProjectMemberRole };
+module.exports = { requestToJoin, decideJoinRequest, LOCAL_USER_ID, workspaceType, migrateLegacyWorkspaceMembers, createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, removePendingProjectMember, updatePendingProjectMemberRole };

@@ -195,7 +195,7 @@ class WecomDelivery {
       const sent = await this.notify(config, member, body);
       return { ...entry, status: 'sent', channel: sent.channel || 'wecom-app', externalMessageId: sent.externalMessageId || null };
     } catch (error) {
-      if (['unbound', 'channel-not-configured'].includes(error.code)) return { ...entry, status: 'unmapped', detail: String(error.message).slice(0, 120) };
+      if (['unbound', 'channel-not-configured', 'needs-hello', 'bot-offline'].includes(error.code)) return { ...entry, status: 'unmapped', detail: String(error.message).slice(0, 120) };
       return { ...entry, status: error.deliveryUnknown ? 'unknown' : 'failed', detail: String(error.message || '发送失败').slice(0, 180) };
     }
   }

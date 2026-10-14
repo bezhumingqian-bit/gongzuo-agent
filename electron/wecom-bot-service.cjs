@@ -5,6 +5,7 @@ const { WecomSendError, recipientUserId } = require('./wecom-service.cjs');
 const { wecomBotEvent, recordWecomEvent } = require('./contracts/source-event.cjs');
 const { actors, workspaceRole } = require('./contracts/policy.cjs');
 const { WorkOperations, WorkError, findTask } = require('./contracts/work-operations.cjs');
+const { requestToJoin } = require('./workspace-service.cjs');
 
 function parseCommand(text) {
   const input = String(text || '').replace(/^@[^\s]+\s*/u, '').trim();
@@ -14,6 +15,8 @@ function parseCommand(text) {
   if (update) return { type: 'update', taskId: update[1], content: update[2].trim() };
   const view = input.match(/^查看\s+([A-Za-z0-9-]{4,100})$/u);
   if (view) return { type: 'view', taskId: view[1] };
+  const join = input.match(/^加入\s+(\S{1,80}?)(?:\s+(?:我是\s*)?([^\s]{1,20}))?$/u);
+  if (join) return { type: 'join', workspace: join[1].trim(), name: (join[2] || '').trim() };
   return { type: 'help' };
 }
 
@@ -118,7 +121,16 @@ class WecomBotBridge {
     });
     if (duplicate) return reply('这条消息已处理。');
     this.publish(updatedData);
-    if (command.type === 'help' && !summary) return reply('共作支持：\n新建 空间名称：工作目标\n更新 工作ID：进展内容\n查看 工作ID\n只有已关联到空间的企微成员可以操作该空间。');
+    if (command.type === 'join') {
+      if (body.chattype === 'group') return reply('请单聊我发送「加入 空间名称 你的名字」，这样我之后才能把工作通知发给你。');
+      let outcome;
+      const joined = await this.store.update(data => { outcome = requestToJoin(data, { userId, workspace: command.workspace, name: command.name }); return data; });
+      this.publish(joined);
+      if (outcome.status === 'workspace-not-found') return reply(`找不到空间「${command.workspace}」，请向同事确认共作里的准确空间名称。`);
+      if (outcome.status === 'already-member') return reply(`你已经在「${outcome.space.name}」里了。有人在共作 @ 你时，我会在这里通知你。`);
+      return reply(`${outcome.status === 'already-requested' ? '已更新' : '已提交'}加入「${outcome.space.name}」的申请，等空间负责人在共作里确认。\n从现在起，有人在共作 @ 你时我可以在这里通知你。`);
+    }
+    if (command.type === 'help' && !summary) return reply('共作支持：\n加入 空间名称 你的名字（第一次使用先发这句）\n新建 空间名称：工作目标\n更新 工作ID：进展内容\n查看 工作ID\n只有已加入空间的企微成员可以操作该空间。');
     const origin = { chatId: body.chattype === 'group' ? body.chatid : userId, userId, msgId, chatType: body.chattype };
     const actor = actors.wecom(userId);
     try {

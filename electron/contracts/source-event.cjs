@@ -66,6 +66,12 @@ function recordWecomEvent(data, event) {
   const at = event.receivedAt;
   data.wecomEvents.push({ msgId: event.sourceId, userId: event.actorId, chatType: event.conversationType, at });
   if (data.wecomEvents.length > WECOM_EVENT_LIMIT) data.wecomEvents.splice(0, data.wecomEvents.length - WECOM_EVENT_LIMIT);
+  // WeCom lets the bot push only to people who messaged it first; remember them.
+  if (event.conversationType === 'single' && event.actorId) {
+    data.wecomBotContacts ||= {};
+    const known = data.wecomBotContacts[event.actorId];
+    data.wecomBotContacts[event.actorId] = { firstAt: known?.firstAt || at, lastAt: at };
+  }
   if (event.conversationType === 'single' && event.text.trim()) {
     recordInboundMessage(data, { channel: 'wecom', eventId: event.sourceId, senderId: event.actorId, conversationId: event.conversationId, text: event.text, receivedAt: at });
   }

@@ -96,6 +96,8 @@ class SettingsService {
     this.workbuddyTokenProvider = null;
     // Fallback source for the CloudAgent key (macOS keychain item written at setup).
     this.cloudagentKeyFallback = null;
+    // Fallback for the WeCom bot secret (keychain item cn.gongzuo.wecom.bot-secret).
+    this.wecomBotSecretFallback = null;
   }
 
   decrypt(value) {
@@ -141,7 +143,7 @@ class SettingsService {
       hasModelKeys: Object.fromEntries(modelProviders.map(provider => [provider, Boolean(savedModelKey(credentials, settings, provider))])),
       hasAgentToken: Boolean(credentials.agentToken),
       hasWecomSecret: Boolean(credentials.wecomSecret),
-      hasWecomBotSecret: Boolean(credentials.wecomBotSecret),
+      hasWecomBotSecret: Boolean(credentials.wecomBotSecret) || Boolean(settings.wecom?.botId && typeof this.wecomBotSecretFallback === 'function' && await this.wecomBotSecretFallback().catch(() => null)),
       hasWorkbuddyAccessToken: Boolean(credentials.workbuddyAccessToken || credentials.workbuddyOAuth),
       hasWorkbuddyManualToken: Boolean(credentials.workbuddyAccessToken),
       hasCloudagentApiKey: Boolean(credentials.cloudagentApiKey),
@@ -162,9 +164,11 @@ class SettingsService {
       try { workbuddyAccessToken = await this.workbuddyTokenProvider(); } catch { workbuddyAccessToken = null; }
       if (workbuddyAccessToken) workbuddyOpenId = (await this.readWorkbuddyOAuth())?.openId || null;
     }
+    let wecomBotSecret = decrypt(credentials.wecomBotSecret);
+    if (!wecomBotSecret && settings.wecom?.botId && typeof this.wecomBotSecretFallback === 'function') wecomBotSecret = await this.wecomBotSecretFallback().catch(() => null);
     let cloudagentApiKey = decrypt(credentials.cloudagentApiKey);
     if (!cloudagentApiKey && settings.agent?.mode === 'cloudagent' && typeof this.cloudagentKeyFallback === 'function') cloudagentApiKey = await this.cloudagentKeyFallback().catch(() => null);
-    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret: decrypt(credentials.wecomBotSecret), workbuddyAccessToken, workbuddyOpenId, cloudagentApiKey, feishuAppSecret: decrypt(credentials.feishuAppSecret) };
+    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret, workbuddyAccessToken, workbuddyOpenId, cloudagentApiKey, feishuAppSecret: decrypt(credentials.feishuAppSecret) };
   }
 
   async save(input = {}) {
