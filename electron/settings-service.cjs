@@ -10,7 +10,7 @@ const defaultSettings = () => ({
   workflow: defaultWorkflow(),
   checks: {}
 });
-const defaultCredentials = () => ({ modelKey: null, modelKeys: {}, agentToken: null, wecomSecret: null, wecomBotSecret: null, workbuddyAccessToken: null, workbuddyClientId: null, workbuddyClientSecret: null, workbuddyOAuth: null, cloudagentApiKey: null });
+const defaultCredentials = () => ({ modelKey: null, modelKeys: {}, agentToken: null, wecomSecret: null, wecomBotSecret: null, workbuddyAccessToken: null, workbuddyClientId: null, workbuddyClientSecret: null, workbuddyOAuth: null, cloudagentApiKey: null, feishuAppSecret: null });
 
 const MODEL_ENDPOINTS = Object.freeze({
   openai: ['https://api.openai.com/v1'],
@@ -56,6 +56,16 @@ function normalizeSettings(input = {}) {
   const recipientUserId = String(input.wecom?.recipientUserId ?? '').trim();
   const botId = String(input.wecom?.botId ?? '').trim();
   const messageScope = input.wecom?.messageScope || 'mentions';
+  // Who I am on the channels: shown to colleagues I message, and how they reach me.
+  const profileName = String(input.profile?.name ?? '').trim();
+  const profileWecom = String(input.profile?.wecomUserId ?? '').trim();
+  const profileFeishu = String(input.profile?.feishuUserId ?? '').trim();
+  if (profileName.length > 40 || /[\r\n]/.test(profileName)) throw new Error('名字不能超过 40 个字');
+  if (profileWecom && !/^[A-Za-z0-9._@-]{1,64}$/.test(profileWecom)) throw new Error('我的企微 UserID 格式无效');
+  if (profileFeishu && !/^[A-Za-z0-9._@-]{1,80}$/.test(profileFeishu)) throw new Error('我的飞书 ID 格式无效');
+  const feishuAppId = String(input.feishu?.appId ?? '').trim();
+  const feishuDomain = input.feishu?.domain === 'lark' ? 'lark' : 'feishu';
+  if (feishuAppId && !/^cli_[A-Za-z0-9]{8,40}$/.test(feishuAppId)) throw new Error('飞书 App ID 应以 cli_ 开头');
   if (organizationId.length > 120 || applicationId.length > 120 || /[\r\n]/.test(organizationId + applicationId)) throw new Error('企业微信标识无效');
   if (applicationId && !/^[1-9]\d{0,14}$/.test(applicationId)) throw new Error('企业微信 AgentID 应为数字');
   if (recipientUserId && (!/^[A-Za-z0-9._@-]{1,64}$/.test(recipientUserId) || recipientUserId.toLowerCase() === '@all')) throw new Error('企业微信收件成员 UserID 无效');
@@ -65,6 +75,8 @@ function normalizeSettings(input = {}) {
     model: { provider, modelId, baseUrl },
     agent: { mode, endpoint: agentEndpoint, ...(TRANSPORTS.includes(workbuddyTransport) ? { workbuddyTransport } : {}) },
     wecom: { organizationId, applicationId, recipientUserId, botId, messageScope },
+    profile: { name: profileName, wecomUserId: profileWecom, feishuUserId: profileFeishu },
+    feishu: { appId: feishuAppId, domain: feishuDomain },
     workflow: normalizeWorkflow(input.workflow)
   };
 }
@@ -133,6 +145,7 @@ class SettingsService {
       hasWorkbuddyAccessToken: Boolean(credentials.workbuddyAccessToken || credentials.workbuddyOAuth),
       hasWorkbuddyManualToken: Boolean(credentials.workbuddyAccessToken),
       hasCloudagentApiKey: Boolean(credentials.cloudagentApiKey),
+      hasFeishuSecret: Boolean(credentials.feishuAppSecret),
       cloudagentKeychain: !credentials.cloudagentApiKey && typeof this.cloudagentKeyFallback === 'function' ? Boolean(await this.cloudagentKeyFallback().catch(() => null)) : false,
       secretStorageAvailable: Boolean(this.safeStorage.isEncryptionAvailable()),
       connectionState: 'not-tested'
@@ -151,7 +164,7 @@ class SettingsService {
     }
     let cloudagentApiKey = decrypt(credentials.cloudagentApiKey);
     if (!cloudagentApiKey && settings.agent?.mode === 'cloudagent' && typeof this.cloudagentKeyFallback === 'function') cloudagentApiKey = await this.cloudagentKeyFallback().catch(() => null);
-    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret: decrypt(credentials.wecomBotSecret), workbuddyAccessToken, workbuddyOpenId, cloudagentApiKey };
+    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret: decrypt(credentials.wecomBotSecret), workbuddyAccessToken, workbuddyOpenId, cloudagentApiKey, feishuAppSecret: decrypt(credentials.feishuAppSecret) };
   }
 
   async save(input = {}) {
@@ -178,6 +191,8 @@ class SettingsService {
     const clearWorkbuddyClient = input.clearWorkbuddyClient === true;
     const cloudagentApiKey = readSecretInput(input.cloudagentApiKey, 'CodeBuddy API Key');
     const clearCloudagentApiKey = input.clearCloudagentApiKey === true;
+    const feishuAppSecret = readSecretInput(input.feishuAppSecret, '飞书 App Secret');
+    const clearFeishuSecret = input.clearFeishuSecret === true;
     if ((modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || workbuddyClientSecret) && !this.safeStorage.isEncryptionAvailable()) {
       throw new Error('macOS 安全存储当前不可用，无法保存密钥');
     }
@@ -192,7 +207,11 @@ class SettingsService {
       if (!this.safeStorage.isEncryptionAvailable()) throw new Error('macOS 安全存储当前不可用，无法保存密钥');
       encrypted.cloudagentApiKey = this.safeStorage.encryptString(cloudagentApiKey).toString('base64');
     }
-    if (cloudagentApiKey || clearCloudagentApiKey || modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || workbuddyClientId || workbuddyClientSecret || clearWorkbuddyClient || clearModelKey || clearAgentToken || clearWecomSecret || clearWecomBotSecret || clearWorkbuddyAccessToken || previousSettings.model.provider !== settings.model.provider) {
+    if (feishuAppSecret) {
+      if (!this.safeStorage.isEncryptionAvailable()) throw new Error('macOS 安全存储当前不可用，无法保存密钥');
+      encrypted.feishuAppSecret = this.safeStorage.encryptString(feishuAppSecret).toString('base64');
+    }
+    if (feishuAppSecret || clearFeishuSecret || cloudagentApiKey || clearCloudagentApiKey || modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || workbuddyClientId || workbuddyClientSecret || clearWorkbuddyClient || clearModelKey || clearAgentToken || clearWecomSecret || clearWecomBotSecret || clearWorkbuddyAccessToken || previousSettings.model.provider !== settings.model.provider) {
       await this.credentials.update(current => ({
         ...current,
         modelKey: null,
@@ -206,6 +225,7 @@ class SettingsService {
         wecomBotSecret: clearWecomBotSecret ? null : encrypted.wecomBotSecret || current.wecomBotSecret,
         workbuddyAccessToken: clearWorkbuddyAccessToken ? null : encrypted.workbuddyAccessToken || current.workbuddyAccessToken,
         cloudagentApiKey: clearCloudagentApiKey ? null : encrypted.cloudagentApiKey || current.cloudagentApiKey || null,
+        feishuAppSecret: clearFeishuSecret ? null : encrypted.feishuAppSecret || current.feishuAppSecret || null,
         workbuddyClientId: clearWorkbuddyClient ? null : workbuddyClientId || current.workbuddyClientId || null,
         workbuddyClientSecret: clearWorkbuddyClient ? null : encrypted.workbuddyClientSecret || current.workbuddyClientSecret || null,
         // Changing or removing the app invalidates the session issued for it.
@@ -217,7 +237,7 @@ class SettingsService {
   }
 
   async recordCheck(kind, result) {
-    if (!['model', 'agent', 'wecom'].includes(kind)) throw new Error('连接类型无效');
+    if (!['model', 'agent', 'wecom', 'feishu'].includes(kind)) throw new Error('连接类型无效');
     await this.settings.update(current => ({
       ...current,
       checks: {

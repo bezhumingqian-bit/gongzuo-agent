@@ -59,6 +59,11 @@ class TaskRunner {
     const config = await this.settingsService.getRuntimeConfig();
     const task = createLocalTask({ goal, workspace });
     if (related.length) task.relatedWorkspaces = related;
+    if (Array.isArray(options.mentions) && options.mentions.length) {
+      const mentions = resolveMentions(await this.store.read(), task, options.mentions);
+      task.messages[0].mentions = mentions;
+      task.messages[0].mentionDelivery = 'not_sent';
+    }
     task.messages[0].documentRefs = refs;
     if (origin) task.messages[0].wecomOrigin = origin;
     task.agentMode = options.agentMode || config.agent.mode;
@@ -100,8 +105,9 @@ class TaskRunner {
     return message;
   }
 
-  async createOutbound(text, workspace) {
+  async createOutbound(text, workspace, mentionIds = []) {
     const task = createLocalTask({ goal: text, workspace });
+    if (mentionIds.length) { task.messages[0].mentions = resolveMentions(await this.store.read(), task, mentionIds); task.messages[0].mentionDelivery = 'not_sent'; }
     task.title = `企微消息 · ${workspace}`;
     task.status = 'done';
     task.steps = [];
@@ -113,12 +119,13 @@ class TaskRunner {
     return { ...task.messages[0], taskId: task.id };
   }
 
-  async appendOutbound(taskId, text) {
+  async appendOutbound(taskId, text, mentionIds = []) {
     let message;
     const data = await this.store.update(draft => {
       const task = draft.tasks.find(item => item.id === taskId);
       if (!task) throw new Error('任务不存在');
-      message = { id: crypto.randomUUID(), role: 'user', text, createdAt: new Date().toISOString(), wecomOutbound: true };
+      const mentions = mentionIds.length ? resolveMentions(draft, task, mentionIds) : [];
+      message = { id: crypto.randomUUID(), role: 'user', text, createdAt: new Date().toISOString(), wecomOutbound: true, ...(mentions.length ? { mentions, mentionDelivery: 'not_sent' } : {}) };
       task.messages.push(message);
       task.updatedAt = message.createdAt;
       return draft;
@@ -127,10 +134,10 @@ class TaskRunner {
     return { ...message, taskId };
   }
 
-  async recordOutbound(text, workspace, taskId = null) {
-    if (taskId) return this.appendOutbound(taskId, text);
+  async recordOutbound(text, workspace, taskId = null, mentionIds = []) {
+    if (taskId) return this.appendOutbound(taskId, text, mentionIds);
     const existing = (await this.store.read()).tasks.find(task => task.channelOnly && task.workspace === workspace);
-    return existing ? this.appendOutbound(existing.id, text) : this.createOutbound(text, workspace);
+    return existing ? this.appendOutbound(existing.id, text, mentionIds) : this.createOutbound(text, workspace, mentionIds);
   }
 
   schedule(taskId, triggerId) {

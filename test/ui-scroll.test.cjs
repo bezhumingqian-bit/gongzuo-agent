@@ -78,7 +78,7 @@ test('消息收件区分企微新旧记录并转义外部正文', () => {
   assert.equal(vm.runInContext("state.quickPanel", context), null);
 });
 
-test('Mac 输入框明确区分交给 Agent 与直接发企微', () => {
+test('输入框只交给 Agent；@ 同事入口在两处输入框都有，不再有直接发企微按钮', () => {
   let html = '';
   const root = { set innerHTML(value) { html = value; }, querySelector: () => null, addEventListener() {} };
   const context = {
@@ -88,10 +88,12 @@ test('Mac 输入框明确区分交给 Agent 与直接发企微', () => {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../demo/app.js'), 'utf8'), context);
   vm.runInContext("state.homeMode='agent';render()", context);
-  assert.match(html, /data-action="open-wecom-composer"[^>]*直接发送到企微，不调用 Agent/);
+  assert.doesNotMatch(html, /open-wecom-composer/);
   assert.match(html, /data-action="submit"[^>]*aria-label="交给 Agent"/);
+  assert.match(html, /data-action="toggle-mentions" data-input="home-input"/);
   vm.runInContext("state.view='task';state.task='feedback';render()", context);
-  assert.match(html, /data-action="open-wecom-composer"[^>]*data-input="thread-input"/);
+  assert.match(html, /data-action="toggle-mentions" data-input="thread-input"/);
+  assert.doesNotMatch(html, /open-wecom-composer/);
   vm.runInContext("tasks=[{id:'channel',title:'企微消息',goal:'同一条通知',workspace:'产品团队',messages:[{id:'one',role:'user',text:'同一条通知',wecomOutbound:true},{id:'two',role:'user',text:'同一条通知',wecomOutbound:true}]}];state.task='channel';render()", context);
   assert.equal((html.match(/<p>同一条通知<\/p>/g) || []).length, 2);
 });

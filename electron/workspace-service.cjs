@@ -75,11 +75,36 @@ function linkWecomProjectMember(data, input, actorId = LOCAL_USER_ID) {
   return member;
 }
 
+// Bind a colleague's Feishu account: to an existing member (memberId) or as a
+// new Feishu-only member. Feishu is a secondary channel next to WeCom.
+function linkFeishuProjectMember(data, input, actorId = LOCAL_USER_ID) {
+  const workspace = data.workspaces.find(space => space.id === input.workspaceId && ['project', 'team'].includes(workspaceType(space)));
+  if (!workspace) throw new Error('团队或项目空间不存在');
+  if (workspaceType(workspace) === 'project' && workspace.createdBy !== actorId) throw new Error('只有空间创建者可以关联成员');
+  const feishuId = String(input.feishuId || '').trim();
+  if (!feishuId || feishuId.length > 120 || !(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(feishuId) || /^[A-Za-z0-9_-]{1,80}$/.test(feishuId))) throw new Error('请填写同事的飞书邮箱、user_id 或 open_id');
+  workspace.members ||= [];
+  if (workspace.members.some(item => item.feishuId === feishuId && item.id !== input.memberId)) throw new Error('该飞书账号已在空间中');
+  if (input.memberId) {
+    const member = workspace.members.find(item => item.id === input.memberId && item.id !== LOCAL_USER_ID);
+    if (!member) throw new Error('成员不存在');
+    member.feishuId = feishuId;
+    return member;
+  }
+  const name = String(input.name || '').trim().slice(0, 40);
+  if (!name) throw new Error('请填写同事姓名');
+  const role = input.role || 'editor';
+  if (!['viewer', 'editor'].includes(role)) throw new Error('项目权限无效');
+  const member = { id: crypto.randomUUID(), name, feishuId, role, status: 'feishu', addedAt: new Date().toISOString() };
+  workspace.members.push(member);
+  return member;
+}
+
 function removePendingProjectMember(data, input, actorId = LOCAL_USER_ID) {
   const workspace = data.workspaces.find(space => space.id === input.workspaceId && ['project', 'team'].includes(workspaceType(space)));
   if (!workspace) throw new Error('团队或项目空间不存在');
   if (workspaceType(workspace) === 'project' && workspace.createdBy !== actorId) throw new Error('只有空间创建者可以管理成员');
-  const index = (workspace.members || []).findIndex(member => member.id === input.memberId && ['pending', 'wecom'].includes(member.status));
+  const index = (workspace.members || []).findIndex(member => member.id === input.memberId && ['pending', 'wecom', 'feishu'].includes(member.status));
   if (index < 0) throw new Error('待邀请或企微成员不存在');
   workspace.members.splice(index, 1);
   return true;
@@ -90,10 +115,10 @@ function updatePendingProjectMemberRole(data, input, actorId = LOCAL_USER_ID) {
   if (!workspace) throw new Error('团队或项目空间不存在');
   if (workspaceType(workspace) === 'project' && workspace.createdBy !== actorId) throw new Error('只有空间创建者可以管理成员');
   if (!['viewer','editor'].includes(input.role)) throw new Error('项目权限无效');
-  const member = (workspace.members || []).find(item => item.id === input.memberId && ['pending', 'wecom'].includes(item.status));
+  const member = (workspace.members || []).find(item => item.id === input.memberId && ['pending', 'wecom', 'feishu'].includes(item.status));
   if (!member) throw new Error('待邀请或企微成员不存在');
   member.role = input.role;
   return member;
 }
 
-module.exports = { LOCAL_USER_ID, workspaceType, migrateLegacyWorkspaceMembers, createProjectWorkspace, addProjectMember, linkWecomProjectMember, removePendingProjectMember, updatePendingProjectMemberRole };
+module.exports = { LOCAL_USER_ID, workspaceType, migrateLegacyWorkspaceMembers, createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, removePendingProjectMember, updatePendingProjectMemberRole };

@@ -17,12 +17,13 @@ const { testConnection } = require('./connection-service.cjs');
 const { readWorkBuddyReply } = require('./workbuddy-service.cjs');
 const { modelPortalUrl, WORKBUDDY_PORTAL } = require('./provider-links.cjs');
 const { DocumentService } = require('./document-service.cjs');
-const { createProjectWorkspace, addProjectMember, linkWecomProjectMember, removePendingProjectMember, updatePendingProjectMemberRole, migrateLegacyWorkspaceMembers } = require('./workspace-service.cjs');
+const { createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, removePendingProjectMember, updatePendingProjectMemberRole, migrateLegacyWorkspaceMembers } = require('./workspace-service.cjs');
 const { TaskRunner } = require('./task-runner.cjs');
 const { WecomDelivery, recipientUserId, fetchVisibleMembers, sendViaWecom } = require('./wecom-service.cjs');
 const { WecomBotBridge } = require('./wecom-bot-service.cjs');
 const { WorkBuddyBridge } = require('./workbuddy-bridge.cjs');
 const { WorkBuddyOAuth } = require('./workbuddy-oauth.cjs');
+const { notifyMember, reachability } = require('./channel-router.cjs');
 
 let mainWindow;
 let store;
@@ -100,7 +101,10 @@ function registerIpc() {
   ipcMain.handle('settings:get', async event => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     const data = await store.read();
-    return { ...await settingsService.getPublic(), workbuddyAuth: await workbuddyAuth.status(), workbuddyBridge: workbuddyBridge?.status || { listening: false, lastClientAt: null }, wecomBotStatus: wecomBot?.status || '未配置', wecomBotLastTextFrameAt: wecomBot?.lastTextFrameAt || null, wecomBotLastTextFrameStatus: wecomBot?.lastTextFrameStatus || '尚未收到', wecomRecentInbound: (data.wecomEvents || []).slice(-5).reverse().map(({ userId, chatType, at }) => ({ userId, chatType, at })) };
+    const runtime = await settingsService.getRuntimeConfig();
+    const memberReach = {};
+    for (const space of data.workspaces || []) for (const member of space.members || []) memberReach[member.id] = reachability(member, runtime, wecomBot);
+    return { ...await settingsService.getPublic(), memberReach, workbuddyAuth: await workbuddyAuth.status(), workbuddyBridge: workbuddyBridge?.status || { listening: false, lastClientAt: null }, wecomBotStatus: wecomBot?.status || '未配置', wecomBotLastTextFrameAt: wecomBot?.lastTextFrameAt || null, wecomBotLastTextFrameStatus: wecomBot?.lastTextFrameStatus || '尚未收到', wecomRecentInbound: (data.wecomEvents || []).slice(-5).reverse().map(({ userId, chatType, at }) => ({ userId, chatType, at })) };
   });
 
   ipcMain.handle('settings:save', async (event, input) => {
@@ -112,7 +116,7 @@ function registerIpc() {
 
   ipcMain.handle('integrations:test', async (event, kind) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
-    if (!['model', 'agent', 'wecom'].includes(kind)) throw new Error('连接类型无效');
+    if (!['model', 'agent', 'wecom', 'feishu'].includes(kind)) throw new Error('连接类型无效');
     const config = await settingsService.getRuntimeConfig();
     let result;
     if (kind === 'agent' && config.agent?.mode === 'workbuddy' && require('./workbuddy-transport.cjs').transportOf(config) === 'handoff') {
@@ -122,6 +126,12 @@ function registerIpc() {
         : bridge.lastClientAt
           ? { ok: true, message: `WorkBuddy 已通过本机连接器访问共作（最近一次 ${bridge.lastClientAt.slice(0, 19).replace('T', ' ')} UTC）` }
           : { ok: false, message: '本机连接已就绪，但 WorkBuddy 尚未调用；请在 WorkBuddy 中信任「gongzuo」连接器后让它查看共作待处理工作' };
+      await settingsService.recordCheck(kind, result);
+      return result;
+    }
+    if (kind === 'feishu') {
+      try { result = await require('./feishu-service.cjs').checkFeishu(config); }
+      catch (error) { result = { ok: false, message: error.message }; }
       await settingsService.recordCheck(kind, result);
       return result;
     }
@@ -212,7 +222,10 @@ function registerIpc() {
     const goal = assertString(input.goal, '工作目标');
     const current = await store.read();
     const workspace = current.workspaces.some(item => item.name === input.workspace) ? input.workspace : current.activeWorkspace;
-    return workOps.create(actors.local(), { workspace, goal, documentIds: input.documentIds || [], relatedWorkspaces: Array.isArray(input.relatedWorkspaces) ? input.relatedWorkspaces.slice(0, 10) : null });
+    const mentions = Array.isArray(input.mentions) ? input.mentions.slice(0, 10) : [];
+    const task = await workOps.create(actors.local(), { workspace, goal, documentIds: input.documentIds || [], relatedWorkspaces: Array.isArray(input.relatedWorkspaces) ? input.relatedWorkspaces.slice(0, 10) : null, options: mentions.length ? { mentions } : {} });
+    if (task.messages?.[0]?.mentions?.length) await wecomDelivery.sendMentions(task.id, task.messages[0].id);
+    return (await store.read()).tasks.find(item => item.id === task.id) || task;
   });
 
   ipcMain.handle('tasks:append-message', async (event, input = {}) => {
@@ -232,6 +245,13 @@ function registerIpc() {
   ipcMain.handle('tasks:retry-agent', async (event, taskId) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     return taskRunner.retry(assertString(taskId, '任务 ID', 100));
+  });
+
+  ipcMain.handle('wecom:forward-to-members', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const taskId = assertString(input.taskId, '任务 ID', 100);
+    await workOps.view(actors.local(), taskId);
+    return wecomDelivery.forwardToMembers(taskId, assertString(input.messageId, '消息 ID', 100), Array.isArray(input.memberIds) ? input.memberIds.map(id => assertString(id, '成员', 100)) : []);
   });
 
   ipcMain.handle('tasks:set-related-spaces', async (event, input = {}) => {
@@ -296,6 +316,13 @@ function registerIpc() {
       addProjectMember(draft, input);
       return draft;
     });
+    publishData(data);
+    return data;
+  });
+
+  ipcMain.handle('workspace:link-feishu-member', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const data = await store.update(draft => { linkFeishuProjectMember(draft, input); return draft; });
     publishData(data);
     return data;
   });
@@ -531,7 +558,7 @@ app.whenReady().then(async () => {
   taskRunner = new TaskRunner({ store, settingsService, personalMemoryStore, teamMemoryStore, documentService, agent, publish: publishData });
   workOps = new WorkOperations({ store, taskRunner });
   wecomBot = new WecomBotBridge({ store, settingsService, taskRunner, ops: workOps, publish: publishData });
-  wecomDelivery = new WecomDelivery({ store, settingsService, publish: publishData, send: (config, userId, text) => sendViaWecom(config, userId, text, wecomBot) });
+  wecomDelivery = new WecomDelivery({ store, settingsService, publish: publishData, send: (config, userId, text) => sendViaWecom(config, userId, text, wecomBot), notify: (config, member, text) => notifyMember(config, member, text, { bot: wecomBot }) });
   taskRunner.onAgentAnswer = event => wecomBot.sendAgentAnswer(event);
   workbuddyBridge = new WorkBuddyBridge({ userDataDir: app.getPath('userData'), store, taskRunner, ops: workOps, version: app.getVersion() });
   await taskRunner.markInterrupted();

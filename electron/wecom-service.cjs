@@ -1,5 +1,21 @@
 const { requestJson } = require('./connection-service.cjs');
 const { taskLink } = require('./runtime-channel.cjs');
+const { taskMemberSpaces, findMember } = require('./mention-service.cjs');
+
+const MAX_BYTES = 2048;
+
+// Fit a message into WeCom's limit, keeping the header and the work link.
+function fitWecom(head, text, tail) {
+  const full = `${head}${text}${tail}`;
+  if (Buffer.byteLength(full, 'utf8') <= MAX_BYTES) return full;
+  const note = '…（内容较长，完整内容见共作）';
+  const budget = MAX_BYTES - Buffer.byteLength(`${head}${note}${tail}`, 'utf8');
+  let body = String(text);
+  while (body && Buffer.byteLength(body, 'utf8') > budget) body = body.slice(0, Math.floor(body.length * 0.9));
+  return `${head}${body}${note}${tail}`;
+}
+
+const senderName = config => String(config?.profile?.name || '').trim() || '同事';
 
 class WecomSendError extends Error {
   constructor(message, deliveryUnknown = false) {
@@ -85,8 +101,14 @@ async function sendViaWecom(config, userId, content, botBridge, sendApp = sendWe
 }
 
 class WecomDelivery {
-  constructor({ store, settingsService, publish, send = sendWecomText }) {
+  // notify(config, member, text): reaches one colleague through the channel
+  // their account is bound to (see channel-router.cjs). Defaults to WeCom.
+  constructor({ store, settingsService, publish, send = sendWecomText, notify = null }) {
     Object.assign(this, { store, settingsService, publish, send });
+    this.notify = notify || ((config, member, text) => {
+      if (!member?.wecomUserId) return Promise.reject(Object.assign(new Error('还没有绑定企微或飞书'), { code: 'unbound' }));
+      return this.send(config, member.wecomUserId, text);
+    });
   }
 
   async markInterrupted() {
@@ -146,30 +168,61 @@ class WecomDelivery {
     const task = data.tasks.find(item => item.id === taskId);
     const message = task?.messages?.find(item => item.id === messageId);
     if (!task || !message) throw new Error('工作消息不存在');
-    const space = data.workspaces.find(item => item.name === task.workspace);
-    const recipients = (message.mentions || []).map(mention => {
-      const member = space?.members?.find(item => item.id === mention.memberId);
-      return { memberId: mention.memberId, userId: member?.wecomUserId || '', name: mention.name };
-    });
+    const spaces = taskMemberSpaces(data, task);
+    const recipients = (message.mentions || []).map(mention => ({ memberId: mention.memberId, member: findMember(spaces, mention.memberId), name: mention.name }));
     if (!recipients.length) return [];
     const config = await this.settingsService.getRuntimeConfig();
+    const sender = senderName(config);
+    const title = task.channelOnly ? '' : `「${task.title || task.goal || '工作'}」`;
     const results = [];
-    for (const recipient of recipients) {
-      if (!recipient.userId) {
-        results.push({ ...recipient, status: 'unmapped', detail: '此成员尚未关联企微 UserID' });
-        continue;
-      }
-      try {
-        const body = `你在共作的「${task.title || task.goal || '工作'}」中被 @：\n${message.text}\n\n打开工作：${taskLink(taskId)}`;
-        const sent = await this.send(config, recipient.userId, Buffer.byteLength(body, 'utf8') <= 2048 ? body : `你在共作的「${task.title || task.goal || '工作'}」中被 @。\n打开工作：${taskLink(taskId)}`);
-        results.push({ ...recipient, status: 'sent', externalMessageId: sent.externalMessageId, channel: sent.channel || 'application' });
-      } catch (error) {
-        results.push({ ...recipient, status: error.deliveryUnknown ? 'unknown' : 'failed', detail: String(error.message || '发送失败').slice(0, 180) });
-      }
+    for (const { member, ...recipient } of recipients) {
+      const head = message.wecomOutbound ? `${sender} 通过共作发给你${title ? `（${title}）` : ''}：\n` : `${sender} 在共作${title}中 @ 了你：\n`;
+      const body = fitWecom(head, message.text, task.channelOnly ? '' : `\n\n打开工作：${taskLink(taskId)}`);
+      results.push(await this.deliverTo(config, member, recipient, body));
     }
     const finished = await this.store.update(draft => {
       const current = draft.tasks.find(item => item.id === taskId)?.messages?.find(item => item.id === messageId);
       if (current) { current.mentionDeliveries = results; current.mentionDelivery = results.every(item => item.status === 'sent') ? 'sent' : 'partial'; }
+      return draft;
+    });
+    this.publish(finished);
+    return results;
+  }
+
+  // One person, one message: result entry recorded on the message.
+  async deliverTo(config, member, entry, body) {
+    try {
+      const sent = await this.notify(config, member, body);
+      return { ...entry, status: 'sent', channel: sent.channel || 'wecom-app', externalMessageId: sent.externalMessageId || null };
+    } catch (error) {
+      if (['unbound', 'channel-not-configured'].includes(error.code)) return { ...entry, status: 'unmapped', detail: String(error.message).slice(0, 120) };
+      return { ...entry, status: error.deliveryUnknown ? 'unknown' : 'failed', detail: String(error.message || '发送失败').slice(0, 180) };
+    }
+  }
+
+  // Forward an existing message of a work (yours or an Agent reply) to members
+  // of the work's spaces. Results are recorded on the message.
+  async forwardToMembers(taskId, messageId, memberIds) {
+    if (!Array.isArray(memberIds) || !memberIds.length || memberIds.length > 10) throw new Error('请选择 1 到 10 位成员');
+    const data = await this.store.read();
+    const task = data.tasks.find(item => item.id === taskId);
+    const message = task?.messages?.find(item => item.id === messageId && ['user', 'assistant'].includes(item.role));
+    if (!task || !message) throw new Error('工作消息不存在');
+    const spaces = taskMemberSpaces(data, task);
+    const config = await this.settingsService.getRuntimeConfig();
+    const sender = senderName(config);
+    const what = message.role === 'assistant' ? ' Agent 的回复' : '一条消息';
+    const body = fitWecom(`${sender} 从共作「${task.title || task.goal || '工作'}」转发给你${what}：\n`, message.text, `\n\n打开工作：${taskLink(taskId)}`);
+    const results = [];
+    for (const id of [...new Set(memberIds)]) {
+      const member = findMember(spaces, id);
+      if (!member) { results.push({ memberId: id, name: '未知成员', status: 'failed', detail: '不是这项工作所在空间的成员' }); continue; }
+      results.push(await this.deliverTo(config, member, { memberId: member.id, name: member.name || '同事' }, body));
+    }
+    const at = new Date().toISOString();
+    const finished = await this.store.update(draft => {
+      const current = draft.tasks.find(item => item.id === taskId)?.messages?.find(item => item.id === messageId);
+      if (current) current.forwards = [...(current.forwards || []), ...results.map(item => ({ ...item, at }))].slice(-30);
       return draft;
     });
     this.publish(finished);
@@ -182,24 +235,24 @@ class WecomDelivery {
     const sending = await this.store.update(draft => {
       const task = draft.tasks.find(item => item.id === taskId);
       if (!task) throw new Error('工作不存在');
-      const space = draft.workspaces.find(item => item.name === task.workspace);
-      const member = space?.members?.find(item => item.id === memberId && ['active', 'wecom'].includes(item.status) && item.wecomUserId);
-      if (!member) throw new Error('请选择当前空间已关联企微的成员');
+      const member = findMember(taskMemberSpaces(draft, task), memberId);
+      if (!member || (!member.wecomUserId && !member.feishuId)) throw new Error('请选择已绑定企微或飞书的成员');
       if (task.assignee?.memberId === memberId && ['sending', 'sent', 'unknown'].includes(task.assignmentDelivery?.status)) throw new Error('这项工作已经指派给该成员，请勿重复发送');
-      recipient = member.wecomUserId;
+      recipient = member;
       taskTitle = task.title || task.goal || '工作';
-      task.assignee = { memberId, name: member.name, wecomUserId: recipient };
-      task.assignmentDelivery = { status: 'sending', recipientUserId: recipient, updatedAt: new Date().toISOString() };
+      task.assignee = { memberId, name: member.name, ...(member.wecomUserId ? { wecomUserId: member.wecomUserId } : {}), ...(member.feishuId ? { feishuId: member.feishuId } : {}) };
+      task.assignmentDelivery = { status: 'sending', recipientUserId: member.wecomUserId || member.feishuId, updatedAt: new Date().toISOString() };
       task.updatedAt = new Date().toISOString();
       return draft;
     });
     this.publish(sending);
     let delivery;
     try {
-      const sent = await this.send(await this.settingsService.getRuntimeConfig(), recipient, `你在共作被指派「${taskTitle}」。\n打开工作：${taskLink(taskId)}`);
-      delivery = { status: 'sent', recipientUserId: recipient, externalMessageId: sent.externalMessageId, channel: sent.channel || 'application', updatedAt: new Date().toISOString() };
+      const config = await this.settingsService.getRuntimeConfig();
+      const sent = await this.notify(config, recipient, `${senderName(config)} 在共作把「${taskTitle}」指派给你。\n打开工作：${taskLink(taskId)}`);
+      delivery = { status: 'sent', recipientUserId: recipient.wecomUserId || recipient.feishuId, externalMessageId: sent.externalMessageId, channel: sent.channel || 'wecom-app', updatedAt: new Date().toISOString() };
     } catch (error) {
-      delivery = { status: error.deliveryUnknown ? 'unknown' : 'failed', recipientUserId: recipient, detail: String(error.message || '发送失败').slice(0, 180), updatedAt: new Date().toISOString() };
+      delivery = { status: error.deliveryUnknown ? 'unknown' : 'failed', recipientUserId: recipient.wecomUserId || recipient.feishuId, detail: String(error.message || '发送失败').slice(0, 180), updatedAt: new Date().toISOString() };
     }
     const finished = await this.store.update(draft => {
       const task = draft.tasks.find(item => item.id === taskId);
