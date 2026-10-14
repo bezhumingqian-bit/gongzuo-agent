@@ -29,6 +29,27 @@ class AuthError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
 
+// The platform redirects back with ?error=… for both a user's "cancel" and its
+// own rejections (app not active, scope outside the app's 授权列表, …), so the
+// raw code and description are always shown instead of assuming a cancel.
+function explainAuthorizeError(error, description) {
+  const code = String(error).slice(0, 60);
+  const desc = description ? String(description).slice(0, 160) : '';
+  const hints = {
+    access_denied: '可能是你点了取消，也可能是开放平台应用尚未启用（审核中/未上线）。请到开放平台确认应用状态为「已启用」后重试。',
+    invalid_scope: '请求的权限超出应用「授权列表」。请在开放平台给应用勾选：个人资料、本地助理（读/调用）、云端任务（读/调用）后重试。',
+    unauthorized_client: '开放平台应用不是启用状态。请确认应用已审核通过并启用。',
+    invalid_request: '授权参数被拒绝，请确认开放平台登记的回调地址为 http://127.0.0.1:47321/oauth/callback。'
+  };
+  const hint = hints[code] || '请把本页地址栏里的完整链接发给助手排查。';
+  return {
+    code: code === 'access_denied' ? 'denied' : code,
+    title: code === 'access_denied' ? '授权被拒绝' : '授权未完成',
+    detail: `错误码：${code}${desc ? `（${desc}）` : ''}。${hint}`,
+    message: `WorkBuddy 授权页返回 ${code}${desc ? `：${desc}` : ''}。${hint}`
+  };
+}
+
 const base64url = buffer => buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
 function readKeychain(service) {
@@ -54,7 +75,9 @@ function localClientCredentials({ settingsService, keychain = readKeychain } = {
   };
 }
 
-const CALLBACK_PAGE = (title, detail) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:-apple-system,sans-serif;background:#f7f8fa;color:#1e3a8a;display:grid;place-items:center;height:100vh;margin:0"><div style="background:#fff;padding:32px 40px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08);text-align:center"><h2 style="margin:0 0 8px">${title}</h2><p style="margin:0;color:#475569">${detail}</p></div>`;
+const escapeHtml = value => String(value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+// Title/detail may carry platform-supplied text (error_description), so escape.
+const CALLBACK_PAGE = (rawTitle, rawDetail) => { const title = escapeHtml(rawTitle); const detail = escapeHtml(rawDetail); return `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:-apple-system,sans-serif;background:#f7f8fa;color:#1e3a8a;display:grid;place-items:center;height:100vh;margin:0"><div style="background:#fff;padding:32px 40px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08);text-align:center"><h2 style="margin:0 0 8px">${title}</h2><p style="margin:0;color:#475569;max-width:420px;line-height:1.6">${detail}</p></div>`; };
 
 function tokenError(status, body) {
   const code = body?.error || body?.code || '';
@@ -169,7 +192,11 @@ class WorkBuddyOAuth {
           return;
         }
         const denied = incoming.searchParams.get('error');
-        if (denied) { finish(false, '已取消授权', '可以关闭此页面。', new AuthError('denied', denied === 'access_denied' ? '你在 WorkBuddy 授权页取消了授权' : `WorkBuddy 授权页返回错误：${denied.slice(0, 80)}`)); return; }
+        if (denied) {
+          const explained = explainAuthorizeError(denied, incoming.searchParams.get('error_description'));
+          finish(false, explained.title, explained.detail, new AuthError(explained.code, explained.message));
+          return;
+        }
         const code = incoming.searchParams.get('code');
         if (!code) { finish(false, '授权未完成', '没有收到授权码，请重试。', new AuthError('no-code', 'WorkBuddy 没有返回授权码')); return; }
         this.postToken({ grant_type: 'authorization_code', code, redirect_uri: this.redirectUri, client_id: client.clientId, client_secret: client.clientSecret, code_verifier: verifier })
@@ -229,4 +256,4 @@ class WorkBuddyOAuth {
   async signOut() { await this.settingsService.writeWorkbuddyOAuth(null); }
 }
 
-module.exports = { WorkBuddyOAuth, AuthError, localClientCredentials, readKeychain, REDIRECT_URI, SCOPES, CALLBACK_PORT, KEYCHAIN };
+module.exports = { WorkBuddyOAuth, AuthError, explainAuthorizeError, localClientCredentials, readKeychain, REDIRECT_URI, SCOPES, CALLBACK_PORT, KEYCHAIN };

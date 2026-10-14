@@ -82,16 +82,24 @@ test('授权：打开授权页带 state 与 PKCE，回调伪造被忽略，正�
   assert.equal(settings.record.refreshToken, 'rt_1');
 });
 
-test('授权：用户在授权页取消、应用凭据错误时给出明确原因', async () => {
-  for (const [secret, query, pattern] of [['sec_test', 'error=access_denied', /取消了授权/], ['wrong', 'code=c_1', /不认可这个应用/]]) {
+test('授权：授权页拒绝、应用凭据错误时给出错误码与排查方向，回调页转义平台文本', async () => {
+  const cases = [
+    ['sec_test', 'error=access_denied', /access_denied.*取消.*尚未启用/, /授权被拒绝/],
+    ['sec_test', 'error=invalid_scope&error_description=scope%20not%20bound', /invalid_scope：scope not bound.*授权列表/, /invalid_scope/],
+    ['sec_test', 'error=server_error&error_description=%3Cscript%3Ex%3C%2Fscript%3E', /server_error/, /&lt;script&gt;/],
+    ['wrong', 'code=c_1', /不认可这个应用/, /授权失败/]
+  ];
+  for (const [secret, query, pattern, pagePattern] of cases) {
     const port = await freePort();
     const settings = memorySettings({ clientId: 'cb_test', clientSecret: secret });
     let open; const opened = new Promise(resolve => { open = resolve; });
     const auth = new WorkBuddyOAuth({ settingsService: settings, openExternal: url => open(url), fetchImpl: platform().fetchImpl, port });
     const outcome = auth.authorize().then(() => null, error => error);
     const url = new URL(await opened);
-    await fetch(`${url.searchParams.get('redirect_uri')}?${query}&state=${encodeURIComponent(url.searchParams.get('state'))}`);
+    const page = await (await fetch(`${url.searchParams.get('redirect_uri')}?${query}&state=${encodeURIComponent(url.searchParams.get('state'))}`)).text();
     assert.match((await outcome)?.message || '', pattern);
+    assert.match(page, pagePattern);
+    assert.doesNotMatch(page, /<script>/);
     assert.equal(settings.record, null);
   }
 });
