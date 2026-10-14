@@ -109,15 +109,13 @@ class WecomDelivery {
     let text;
     const sending = await this.store.update(draft => {
       const task = draft.tasks.find(item => item.id === taskId);
-      const message = task?.messages?.find(item => item.id === messageId && ['user', 'assistant'].includes(item.role));
+      const message = task?.messages?.find(item => item.id === messageId && item.role === 'user');
       if (!message) throw new Error('工作消息不存在');
       if (['sending', 'sent', 'unknown'].includes(message.wecomDelivery?.status)) {
         throw new Error('这条消息已发送或发送结果未知，请勿重复发送');
       }
-      // Retrying a synced message keeps the synced wording.
-      text = message.wecomDelivery?.via === 'sync' ? WecomDelivery.syncBody(task, message) : message.text;
-      if (Buffer.byteLength(text, 'utf8') > 2048) text = WecomDelivery.syncBody(task, message);
-      message.wecomDelivery = { status: 'sending', recipientUserId: recipient, ...(message.wecomDelivery?.via ? { via: message.wecomDelivery.via } : {}), updatedAt: new Date().toISOString() };
+      text = message.text;
+      message.wecomDelivery = { status: 'sending', recipientUserId: recipient, updatedAt: new Date().toISOString() };
       return draft;
     });
     this.publish(sending);
@@ -133,74 +131,6 @@ class WecomDelivery {
         detail: String(error.message || '企业微信发送失败').slice(0, 180),
         updatedAt: new Date().toISOString()
       };
-    }
-    const finished = await this.store.update(draft => {
-      const message = draft.tasks.find(item => item.id === taskId)?.messages.find(item => item.id === messageId);
-      if (message?.wecomDelivery?.status === 'sending') message.wecomDelivery = delivery;
-      return draft;
-    });
-    this.publish(finished);
-    return delivery;
-  }
-
-  // ---- 同步到企微：a work opted in sends every new message to one member ----
-
-  // Messages worth syncing: what the local user wrote and what the Agent
-  // answered. Messages that came in from WeCom are not echoed back.
-  static syncable(message) {
-    if (!message?.id || message.wecomOrigin || message.wecomDelivery) return false;
-    if (message.role === 'user') return Boolean(String(message.text || '').trim());
-    if (message.role === 'assistant') return !['connection-error', 'workbuddy-pending'].includes(message.source) && Boolean(String(message.text || '').trim());
-    return false;
-  }
-
-  static syncBody(task, message) {
-    const title = String(task.title || task.goal || '工作').slice(0, 40);
-    const author = message.role === 'assistant' ? 'Agent' : '我';
-    const link = `\n\n打开工作：${taskLink(task.id)}`;
-    const head = `【共作｜${title}】${author}：\n`;
-    const full = `${head}${message.text}${link}`;
-    if (Buffer.byteLength(full, 'utf8') <= 2048) return full;
-    const budget = 2048 - Buffer.byteLength(`${head}…（内容较长，完整内容见共作）${link}`, 'utf8');
-    let text = String(message.text);
-    while (Buffer.byteLength(text, 'utf8') > budget) text = text.slice(0, Math.floor(text.length * 0.9));
-    return `${head}${text}…（内容较长，完整内容见共作）${link}`;
-  }
-
-  // Sends one message of a synced work. Calls for the same work are chained so
-  // WeCom receives them in conversation order.
-  syncMessage(taskId, messageId) {
-    this.syncQueues ||= new Map();
-    const previous = this.syncQueues.get(taskId) || Promise.resolve();
-    const next = previous.catch(() => {}).then(() => this.syncOne(taskId, messageId));
-    this.syncQueues.set(taskId, next);
-    next.finally(() => { if (this.syncQueues.get(taskId) === next) this.syncQueues.delete(taskId); }).catch(() => {});
-    return next;
-  }
-
-  async syncOne(taskId, messageId) {
-    let recipient;
-    let body;
-    const sending = await this.store.update(draft => {
-      const task = draft.tasks.find(item => item.id === taskId);
-      const message = task?.messages?.find(item => item.id === messageId);
-      if (!task?.wecomSync?.enabled || !WecomDelivery.syncable(message)) return draft;
-      // The bot already answers whoever wrote in from WeCom; don't send twice.
-      const trigger = message.role === 'assistant' ? task.messages.find(item => item.id === message.replyToId) : null;
-      if (trigger?.wecomOrigin?.userId && trigger.wecomOrigin.userId === task.wecomSync.recipientUserId) return draft;
-      recipient = task.wecomSync.recipientUserId;
-      body = WecomDelivery.syncBody(task, message);
-      message.wecomDelivery = { status: 'sending', recipientUserId: recipient, via: 'sync', updatedAt: new Date().toISOString() };
-      return draft;
-    });
-    if (!recipient) return null;
-    this.publish(sending);
-    let delivery;
-    try {
-      const sent = await this.send(await this.settingsService.getRuntimeConfig(), recipient, body);
-      delivery = { status: 'sent', recipientUserId: recipient, via: 'sync', externalMessageId: sent.externalMessageId, channel: sent.channel || 'application', updatedAt: new Date().toISOString() };
-    } catch (error) {
-      delivery = { status: error.deliveryUnknown ? 'unknown' : 'failed', recipientUserId: recipient, via: 'sync', detail: String(error.message || '企业微信发送失败').slice(0, 180), updatedAt: new Date().toISOString() };
     }
     const finished = await this.store.update(draft => {
       const message = draft.tasks.find(item => item.id === taskId)?.messages.find(item => item.id === messageId);
