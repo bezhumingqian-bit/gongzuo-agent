@@ -1,4 +1,5 @@
 const { WSClient, generateReqId } = require('@wecom/aibot-node-sdk');
+const { taskLink } = require('./runtime-channel.cjs');
 const { matchWorkflow, workflowGoal } = require('./workflow-service.cjs');
 const { WecomSendError, recipientUserId } = require('./wecom-service.cjs');
 const { wecomBotEvent, recordWecomEvent } = require('./contracts/source-event.cjs');
@@ -139,7 +140,7 @@ class WecomBotBridge {
       }
       if (command.type === 'view') {
         const { task } = await this.ops.view(actor, command.taskId);
-        const detail = `「${task.title}」\n空间：${task.workspace}\n状态：${task.agentRun?.status || task.status || '进行中'}\n打开：gongzuo://task/${encodeURIComponent(task.id)}`;
+        const detail = `「${task.title}」\n空间：${task.workspace}\n状态：${task.agentRun?.status || task.status || '进行中'}\n打开：${taskLink(task.id)}`;
         if (body.chattype === 'group') {
           await this.client.sendMessage(userId, { msgtype: 'markdown', markdown: { content: detail } });
           return reply('工作状态已发到你的企微私聊。');
@@ -157,7 +158,7 @@ class WecomBotBridge {
 
   async sendAgentAnswer({ taskId, answer, origin }) {
     if (!this.client || !origin?.userId || !answer?.text) return;
-    const content = `共作工作 ${taskId.slice(0, 8)} 的 Agent ${answer.source === 'connection-error' ? '调用失败' : '回复'}：\n${String(answer.text).slice(0, 2400)}\n\n打开：gongzuo://task/${encodeURIComponent(taskId)}`;
+    const content = `共作工作 ${taskId.slice(0, 8)} 的 Agent ${answer.source === 'connection-error' ? '调用失败' : '回复'}：\n${String(answer.text).slice(0, 2400)}\n\n打开：${taskLink(taskId)}`;
     await this.client.sendMessage(origin.userId, { msgtype: 'markdown', markdown: { content } });
   }
 }

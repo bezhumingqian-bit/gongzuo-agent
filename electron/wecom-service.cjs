@@ -1,4 +1,5 @@
 const { requestJson } = require('./connection-service.cjs');
+const { taskLink } = require('./runtime-channel.cjs');
 
 class WecomSendError extends Error {
   constructor(message, deliveryUnknown = false) {
@@ -159,8 +160,8 @@ class WecomDelivery {
         continue;
       }
       try {
-        const body = `你在共作的「${task.title || task.goal || '工作'}」中被 @：\n${message.text}\n\n打开工作：gongzuo://task/${encodeURIComponent(taskId)}`;
-        const sent = await this.send(config, recipient.userId, Buffer.byteLength(body, 'utf8') <= 2048 ? body : `你在共作的「${task.title || task.goal || '工作'}」中被 @。\n打开工作：gongzuo://task/${encodeURIComponent(taskId)}`);
+        const body = `你在共作的「${task.title || task.goal || '工作'}」中被 @：\n${message.text}\n\n打开工作：${taskLink(taskId)}`;
+        const sent = await this.send(config, recipient.userId, Buffer.byteLength(body, 'utf8') <= 2048 ? body : `你在共作的「${task.title || task.goal || '工作'}」中被 @。\n打开工作：${taskLink(taskId)}`);
         results.push({ ...recipient, status: 'sent', externalMessageId: sent.externalMessageId, channel: sent.channel || 'application' });
       } catch (error) {
         results.push({ ...recipient, status: error.deliveryUnknown ? 'unknown' : 'failed', detail: String(error.message || '发送失败').slice(0, 180) });
@@ -195,7 +196,7 @@ class WecomDelivery {
     this.publish(sending);
     let delivery;
     try {
-      const sent = await this.send(await this.settingsService.getRuntimeConfig(), recipient, `你在共作被指派「${taskTitle}」。\n打开工作：gongzuo://task/${encodeURIComponent(taskId)}`);
+      const sent = await this.send(await this.settingsService.getRuntimeConfig(), recipient, `你在共作被指派「${taskTitle}」。\n打开工作：${taskLink(taskId)}`);
       delivery = { status: 'sent', recipientUserId: recipient, externalMessageId: sent.externalMessageId, channel: sent.channel || 'application', updatedAt: new Date().toISOString() };
     } catch (error) {
       delivery = { status: error.deliveryUnknown ? 'unknown' : 'failed', recipientUserId: recipient, detail: String(error.message || '发送失败').slice(0, 180), updatedAt: new Date().toISOString() };

@@ -105,7 +105,13 @@ class SettingsService {
 
   async getRuntimeConfig() {
     const [settings, credentials] = await Promise.all([this.settings.read(), this.credentials.read()]);
-    const decrypt = value => value ? this.safeStorage.decryptString(Buffer.from(value, 'base64')) : null;
+    // A secret saved by another app build (e.g. dev vs preview, which use
+    // different macOS keychain entries) cannot be decrypted here. Treat it as
+    // missing so startup and the settings page keep working; the user re-enters it.
+    const decrypt = value => {
+      if (!value) return null;
+      try { return this.safeStorage.decryptString(Buffer.from(value, 'base64')); } catch { return null; }
+    };
     return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret: decrypt(credentials.wecomBotSecret), workbuddyAccessToken: decrypt(credentials.workbuddyAccessToken) };
   }
 

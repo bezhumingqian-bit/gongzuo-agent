@@ -1,6 +1,10 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell } = require('electron');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { configureRuntimeChannel, linkScheme } = require('./runtime-channel.cjs');
+// Set paths before the single-instance lock is acquired. Packaged previews
+// share the existing development data, not the old production app's data.
+const runtimeChannel = configureRuntimeChannel(app, require('../package.json'));
 const { JsonStore } = require('./store.cjs');
 const { createSeed } = require('./seed.cjs');
 const { AgentService } = require('./agent-service.cjs');
@@ -463,7 +467,7 @@ function createWindow() {
 function handleTaskLink(raw) {
   try {
     const url = new URL(raw);
-    if (url.protocol !== 'gongzuo:' || url.hostname !== 'task') return;
+    if (url.protocol !== `${linkScheme()}:` || url.hostname !== 'task') return;
     const id = decodeURIComponent(url.pathname.slice(1));
     if (!/^[A-Za-z0-9-]{4,100}$/.test(id)) return;
     pendingTaskLink = id;
@@ -477,11 +481,11 @@ function handleTaskLink(raw) {
 }
 
 app.on('open-url', (event, url) => { event.preventDefault(); handleTaskLink(url); });
-app.on('second-instance', (_event, argv) => { const link = argv.find(arg => arg.startsWith('gongzuo://')); if (link) handleTaskLink(link); });
+app.on('second-instance', (_event, argv) => { const link = argv.find(arg => arg.startsWith(`${linkScheme()}://`)); if (link) handleTaskLink(link); });
 if (!app.requestSingleInstanceLock()) app.quit();
 
 app.whenReady().then(async () => {
-  if (app.isPackaged) app.setAsDefaultProtocolClient('gongzuo');
+  if (app.isPackaged && runtimeChannel.registerProtocol) app.setAsDefaultProtocolClient(runtimeChannel.scheme);
   nativeTheme.themeSource = 'light';
   store = new JsonStore(path.join(app.getPath('userData'), 'workspace.json'), createSeed);
   personalMemoryStore = new JsonStore(path.join(app.getPath('userData'), 'personal-memory.json'), memorySeed);
