@@ -22,6 +22,7 @@ const { TaskRunner } = require('./task-runner.cjs');
 const { WecomDelivery, recipientUserId, fetchVisibleMembers, sendViaWecom } = require('./wecom-service.cjs');
 const { WecomBotBridge } = require('./wecom-bot-service.cjs');
 const { WorkBuddyBridge } = require('./workbuddy-bridge.cjs');
+const { WorkBuddyOAuth } = require('./workbuddy-oauth.cjs');
 
 let mainWindow;
 let store;
@@ -33,6 +34,7 @@ let taskRunner;
 let wecomDelivery;
 let wecomBot;
 let workbuddyBridge;
+let workbuddyAuth;
 let workOps;
 let pendingTaskLink = null;
 const agent = new AgentService();
@@ -98,7 +100,7 @@ function registerIpc() {
   ipcMain.handle('settings:get', async event => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     const data = await store.read();
-    return { ...await settingsService.getPublic(), workbuddyBridge: workbuddyBridge?.status || { listening: false, lastClientAt: null }, wecomBotStatus: wecomBot?.status || '未配置', wecomBotLastTextFrameAt: wecomBot?.lastTextFrameAt || null, wecomBotLastTextFrameStatus: wecomBot?.lastTextFrameStatus || '尚未收到', wecomRecentInbound: (data.wecomEvents || []).slice(-5).reverse().map(({ userId, chatType, at }) => ({ userId, chatType, at })) };
+    return { ...await settingsService.getPublic(), workbuddyAuth: await workbuddyAuth.status(), workbuddyBridge: workbuddyBridge?.status || { listening: false, lastClientAt: null }, wecomBotStatus: wecomBot?.status || '未配置', wecomBotLastTextFrameAt: wecomBot?.lastTextFrameAt || null, wecomBotLastTextFrameStatus: wecomBot?.lastTextFrameStatus || '尚未收到', wecomRecentInbound: (data.wecomEvents || []).slice(-5).reverse().map(({ userId, chatType, at }) => ({ userId, chatType, at })) };
   });
 
   ipcMain.handle('settings:save', async (event, input) => {
@@ -133,6 +135,19 @@ function registerIpc() {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     await shell.openExternal(modelPortalUrl(provider));
     return true;
+  });
+
+  ipcMain.handle('workbuddy:authorize', async event => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const record = await workbuddyAuth.authorize();
+    await settingsService.recordCheck('agent', { ok: true, message: `已授权 WorkBuddy${record.nickname ? `：${record.nickname}` : ''}` });
+    return workbuddyAuth.status();
+  });
+
+  ipcMain.handle('workbuddy:sign-out', async event => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    await workbuddyAuth.signOut();
+    return workbuddyAuth.status();
   });
 
   ipcMain.handle('integrations:open-workbuddy-portal', async event => {
@@ -495,6 +510,8 @@ app.whenReady().then(async () => {
     path.join(app.getPath('userData'), 'credentials.json'),
     safeStorage
   );
+  workbuddyAuth = new WorkBuddyOAuth({ settingsService, openExternal: url => shell.openExternal(url) });
+  settingsService.workbuddyTokenProvider = () => workbuddyAuth.getAccessToken();
   documentService = new DocumentService(
     path.join(app.getPath('userData'), 'documents.json'),
     path.join(app.getPath('userData'), 'documents')

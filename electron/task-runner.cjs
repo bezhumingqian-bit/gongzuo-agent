@@ -161,6 +161,7 @@ class TaskRunner {
       if (task.agentMode !== mode) {
         task.agentMode = mode;
         task.agentSessionId = null;
+        task.agentSessionOwner = null;
         if (task.agentRun?.status === 'awaiting-workbuddy') {
           // The pending hand-off is withdrawn; keep it retryable with the new Agent.
           task.agentRun = { status: 'interrupted', triggerId: task.agentRun.triggerId, updatedAt: new Date().toISOString() };
@@ -299,7 +300,10 @@ class TaskRunner {
       const current = draft.tasks.find(item => item.id === taskId);
       if (!current) return draft;
       if (answer) current.messages.push({ ...answer, replyToId: triggerId });
-      if (answer?.agentSessionId) current.agentSessionId = answer.agentSessionId;
+      if (answer?.agentSessionId) {
+        current.agentSessionId = answer.agentSessionId;
+        if ('agentSessionOwner' in answer) current.agentSessionOwner = answer.agentSessionOwner;
+      }
       current.agentRun = { status: failed ? 'failed' : 'done', triggerId, updatedAt: new Date().toISOString() };
       current.updatedAt = current.agentRun.updatedAt;
       if (failed || (current.workflow && answer?.source !== 'workbuddy-pending')) current.needsMe = true;

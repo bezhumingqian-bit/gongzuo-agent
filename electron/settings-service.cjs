@@ -10,7 +10,7 @@ const defaultSettings = () => ({
   workflow: defaultWorkflow(),
   checks: {}
 });
-const defaultCredentials = () => ({ modelKey: null, modelKeys: {}, agentToken: null, wecomSecret: null, wecomBotSecret: null, workbuddyAccessToken: null });
+const defaultCredentials = () => ({ modelKey: null, modelKeys: {}, agentToken: null, wecomSecret: null, wecomBotSecret: null, workbuddyAccessToken: null, workbuddyClientId: null, workbuddyClientSecret: null, workbuddyOAuth: null });
 
 const MODEL_ENDPOINTS = Object.freeze({
   openai: ['https://api.openai.com/v1'],
@@ -80,6 +80,37 @@ class SettingsService {
     this.settings = new JsonStore(settingsPath, defaultSettings);
     this.credentials = new JsonStore(credentialsPath, defaultCredentials);
     this.safeStorage = safeStorage;
+    // Set by main: returns a fresh OAuth access token (refreshing if needed) or null.
+    this.workbuddyTokenProvider = null;
+  }
+
+  decrypt(value) {
+    // A secret saved by another app build (e.g. dev vs preview, which use
+    // different macOS keychain entries) cannot be decrypted here. Treat it as
+    // missing so startup and the settings page keep working; the user re-enters it.
+    if (!value) return null;
+    try { return this.safeStorage.decryptString(Buffer.from(value, 'base64')); } catch { return null; }
+  }
+
+  encrypt(value) {
+    if (!this.safeStorage.isEncryptionAvailable()) throw new Error('macOS 安全存储当前不可用，无法保存密钥');
+    return this.safeStorage.encryptString(value).toString('base64');
+  }
+
+  async readWorkbuddyOAuth() {
+    const raw = this.decrypt((await this.credentials.read()).workbuddyOAuth);
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+
+  async writeWorkbuddyOAuth(record) {
+    const value = record ? this.encrypt(JSON.stringify(record)) : null;
+    await this.credentials.update(current => ({ ...current, workbuddyOAuth: value }));
+  }
+
+  async getWorkbuddyClient() {
+    const credentials = await this.credentials.read();
+    return { clientId: credentials.workbuddyClientId || null, clientSecret: this.decrypt(credentials.workbuddyClientSecret) };
   }
 
   async initialize() {
@@ -97,7 +128,8 @@ class SettingsService {
       hasAgentToken: Boolean(credentials.agentToken),
       hasWecomSecret: Boolean(credentials.wecomSecret),
       hasWecomBotSecret: Boolean(credentials.wecomBotSecret),
-      hasWorkbuddyAccessToken: Boolean(credentials.workbuddyAccessToken),
+      hasWorkbuddyAccessToken: Boolean(credentials.workbuddyAccessToken || credentials.workbuddyOAuth),
+      hasWorkbuddyManualToken: Boolean(credentials.workbuddyAccessToken),
       secretStorageAvailable: Boolean(this.safeStorage.isEncryptionAvailable()),
       connectionState: 'not-tested'
     };
@@ -105,14 +137,15 @@ class SettingsService {
 
   async getRuntimeConfig() {
     const [settings, credentials] = await Promise.all([this.settings.read(), this.credentials.read()]);
-    // A secret saved by another app build (e.g. dev vs preview, which use
-    // different macOS keychain entries) cannot be decrypted here. Treat it as
-    // missing so startup and the settings page keep working; the user re-enters it.
-    const decrypt = value => {
-      if (!value) return null;
-      try { return this.safeStorage.decryptString(Buffer.from(value, 'base64')); } catch { return null; }
-    };
-    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret: decrypt(credentials.wecomBotSecret), workbuddyAccessToken: decrypt(credentials.workbuddyAccessToken) };
+    const decrypt = value => this.decrypt(value);
+    // A manually pasted token (debugging) wins; otherwise the OAuth session.
+    let workbuddyAccessToken = decrypt(credentials.workbuddyAccessToken);
+    let workbuddyOpenId = null;
+    if (!workbuddyAccessToken && credentials.workbuddyOAuth && typeof this.workbuddyTokenProvider === 'function') {
+      try { workbuddyAccessToken = await this.workbuddyTokenProvider(); } catch { workbuddyAccessToken = null; }
+      if (workbuddyAccessToken) workbuddyOpenId = (await this.readWorkbuddyOAuth())?.openId || null;
+    }
+    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret: decrypt(credentials.wecomBotSecret), workbuddyAccessToken, workbuddyOpenId };
   }
 
   async save(input = {}) {
@@ -133,7 +166,11 @@ class SettingsService {
     const clearWecomSecret = input.clearWecomSecret === true;
     const clearWecomBotSecret = input.clearWecomBotSecret === true;
     const clearWorkbuddyAccessToken = input.clearWorkbuddyAccessToken === true;
-    if ((modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken) && !this.safeStorage.isEncryptionAvailable()) {
+    const workbuddyClientId = input.workbuddyClientId == null || input.workbuddyClientId === '' ? null : String(input.workbuddyClientId).trim();
+    if (workbuddyClientId && !/^[A-Za-z0-9_-]{4,100}$/.test(workbuddyClientId)) throw new Error('WorkBuddy Client ID 格式无效');
+    const workbuddyClientSecret = readSecretInput(input.workbuddyClientSecret, 'WorkBuddy Client Secret');
+    const clearWorkbuddyClient = input.clearWorkbuddyClient === true;
+    if ((modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || workbuddyClientSecret) && !this.safeStorage.isEncryptionAvailable()) {
       throw new Error('macOS 安全存储当前不可用，无法保存密钥');
     }
     const encrypted = {};
@@ -142,7 +179,8 @@ class SettingsService {
     if (wecomSecret) encrypted.wecomSecret = this.safeStorage.encryptString(wecomSecret).toString('base64');
     if (wecomBotSecret) encrypted.wecomBotSecret = this.safeStorage.encryptString(wecomBotSecret).toString('base64');
     if (workbuddyAccessToken) encrypted.workbuddyAccessToken = this.safeStorage.encryptString(workbuddyAccessToken).toString('base64');
-    if (modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || clearModelKey || clearAgentToken || clearWecomSecret || clearWecomBotSecret || clearWorkbuddyAccessToken || previousSettings.model.provider !== settings.model.provider) {
+    if (workbuddyClientSecret) encrypted.workbuddyClientSecret = this.safeStorage.encryptString(workbuddyClientSecret).toString('base64');
+    if (modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || workbuddyClientId || workbuddyClientSecret || clearWorkbuddyClient || clearModelKey || clearAgentToken || clearWecomSecret || clearWecomBotSecret || clearWorkbuddyAccessToken || previousSettings.model.provider !== settings.model.provider) {
       await this.credentials.update(current => ({
         ...current,
         modelKey: null,
@@ -154,7 +192,11 @@ class SettingsService {
         agentToken: clearAgentToken ? null : encrypted.agentToken || current.agentToken,
         wecomSecret: clearWecomSecret ? null : encrypted.wecomSecret || current.wecomSecret,
         wecomBotSecret: clearWecomBotSecret ? null : encrypted.wecomBotSecret || current.wecomBotSecret,
-        workbuddyAccessToken: clearWorkbuddyAccessToken ? null : encrypted.workbuddyAccessToken || current.workbuddyAccessToken
+        workbuddyAccessToken: clearWorkbuddyAccessToken ? null : encrypted.workbuddyAccessToken || current.workbuddyAccessToken,
+        workbuddyClientId: clearWorkbuddyClient ? null : workbuddyClientId || current.workbuddyClientId || null,
+        workbuddyClientSecret: clearWorkbuddyClient ? null : encrypted.workbuddyClientSecret || current.workbuddyClientSecret || null,
+        // Changing or removing the app invalidates the session issued for it.
+        workbuddyOAuth: clearWorkbuddyClient || (workbuddyClientId && current.workbuddyClientId && workbuddyClientId !== current.workbuddyClientId) ? null : current.workbuddyOAuth || null
       }));
     }
     await this.settings.write(settings);

@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('gongzuo', Object.freeze({
   testConnection: kind => ipcRenderer.invoke('integrations:test', kind),
   openModelPortal: provider => ipcRenderer.invoke('integrations:open-model-portal', provider),
   openWorkBuddyPortal: () => ipcRenderer.invoke('integrations:open-workbuddy-portal'),
+  authorizeWorkBuddy: () => ipcRenderer.invoke('workbuddy:authorize'),
+  signOutWorkBuddy: () => ipcRenderer.invoke('workbuddy:sign-out'),
   sendWecomMessage: input => ipcRenderer.invoke('wecom:send-task-message', input),
   sendWecomDraft: input => ipcRenderer.invoke('wecom:send-draft', input),
   syncWecomMembers: () => ipcRenderer.invoke('wecom:sync-members'),

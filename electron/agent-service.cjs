@@ -4,6 +4,16 @@ const { callCodeBuddy } = require('./codebuddy-service.cjs');
 const { callWorkBuddy } = require('./workbuddy-service.cjs');
 const { callWorkBuddyCloud } = require('./workbuddy-cloud.cjs');
 const { workbuddyTransport, transportOf } = require('./workbuddy-transport.cjs');
+
+// A cloud task belongs to the WorkBuddy account that created it. When someone
+// else continues a shared work, start their own cloud task (the full
+// conversation is sent again) instead of loading one their token cannot open.
+function cloudSessionFor(task, config) {
+  if (!task.agentSessionId) return undefined;
+  const owner = task.agentSessionOwner || null;
+  const current = config.workbuddyOpenId || null;
+  return owner && current && owner !== current ? undefined : task.agentSessionId;
+}
 const path = require('node:path');
 const { callLocalAgent, callLocalAgentSession } = require('./local-agent-service.cjs');
 
@@ -79,7 +89,7 @@ class AgentService {
         : config.agent.mode === 'codebuddy'
           ? await this.codeBuddyImpl(task.messages, task.workspace, memoryContext)
           : transport === 'cloud'
-            ? await (this.cloudImpl || callWorkBuddyCloud)(config, task.messages, task.workspace, memoryContext, { sessionId: task.agentSessionId, title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
+            ? await (this.cloudImpl || callWorkBuddyCloud)(config, task.messages, task.workspace, memoryContext, { sessionId: cloudSessionFor(task, config), title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
           : config.agent.mode === 'workbuddy'
             ? await callWorkBuddy(config, task.messages, this.fetchImpl)
           : ['codex', 'kimi'].includes(config.agent.mode)
@@ -90,7 +100,7 @@ class AgentService {
               : await callLocalAgent(config.agent.mode, task.messages, task.workspace, memoryContext)
           : await callModel(config, task.messages, memoryContext, this.fetchImpl);
       const text = typeof result === 'string' ? result : result.text;
-      return { id: crypto.randomUUID(), role: 'assistant', text, createdAt: new Date().toISOString(), source: ['codebuddy', 'codex', 'kimi'].includes(config.agent.mode) ? config.agent.mode : config.agent.mode === 'workbuddy' ? (result.pending ? 'workbuddy-pending' : 'workbuddy') : config.agent.mode === 'external' ? 'external-agent' : 'model', ...(result.messageId ? { externalMessageId: result.messageId } : {}), ...(result.sessionId ? { agentSessionId: result.sessionId } : {}), ...(transport === 'cloud' ? { via: 'cloud-task' } : {}), ...(result.files?.length ? { pendingFiles: result.files, pendingFilesDirectory: result.filesDirectory } : {}) };
+      return { id: crypto.randomUUID(), role: 'assistant', text, createdAt: new Date().toISOString(), source: ['codebuddy', 'codex', 'kimi'].includes(config.agent.mode) ? config.agent.mode : config.agent.mode === 'workbuddy' ? (result.pending ? 'workbuddy-pending' : 'workbuddy') : config.agent.mode === 'external' ? 'external-agent' : 'model', ...(result.messageId ? { externalMessageId: result.messageId } : {}), ...(result.sessionId ? { agentSessionId: result.sessionId } : {}), ...(transport === 'cloud' ? { via: 'cloud-task', agentSessionOwner: config.workbuddyOpenId || null } : {}), ...(result.files?.length ? { pendingFiles: result.files, pendingFilesDirectory: result.filesDirectory } : {}) };
     } catch (error) {
       return { id: crypto.randomUUID(), role: 'assistant', text: `连接失败：${error.message}`, createdAt: new Date().toISOString(), source: 'connection-error' };
     }
@@ -104,4 +114,4 @@ class AgentService {
   }
 }
 
-module.exports = { AgentService, classifyChannelEvent, createLocalTask };
+module.exports = { AgentService, classifyChannelEvent, createLocalTask, cloudSessionFor };
