@@ -59,6 +59,9 @@ class TaskRunner {
     const config = await this.settingsService.getRuntimeConfig();
     const task = createLocalTask({ goal, workspace });
     if (related.length) task.relatedWorkspaces = related;
+    // Settings may turn on 同步到企微 for every new work.
+    if (options.wecomSync) task.wecomSync = options.wecomSync;
+    else if (config.wecom?.syncNewWorks && config.wecom?.recipientUserId && !origin) task.wecomSync = { enabled: true, recipientUserId: config.wecom.recipientUserId, since: task.createdAt };
     task.messages[0].documentRefs = refs;
     if (origin) task.messages[0].wecomOrigin = origin;
     task.agentMode = options.agentMode || config.agent.mode;
@@ -70,6 +73,7 @@ class TaskRunner {
     task.agentRun = { status: this.agent.isConfigured(selectedConfig) ? 'queued' : 'not-configured', triggerId: task.messages[0].id };
     const data = await this.store.update(draft => { draft.tasks.unshift(task); return draft; });
     this.publish(data);
+    this.messageAdded(task.id, task.messages[0].id);
     if (task.agentRun.status === 'queued') this.schedule(task.id, task.messages[0].id);
     return task;
   }
@@ -92,6 +96,7 @@ class TaskRunner {
       return draft;
     });
     this.publish(data);
+    this.messageAdded(taskId, message.id);
     const task = data.tasks.find(item => item.id === taskId);
     const runtime = await this.settingsService.getRuntimeConfig();
     const config = { ...runtime, agent: { ...runtime.agent, mode: task.agentMode || runtime.agent.mode } };
@@ -300,6 +305,25 @@ class TaskRunner {
     }
   }
 
+  // Hook for channels that mirror a work's conversation (同步到企微).
+  messageAdded(taskId, messageId) {
+    if (typeof this.onMessageAdded === 'function') Promise.resolve().then(() => this.onMessageAdded({ taskId, messageId })).catch(() => {});
+  }
+
+  async setWecomSync(taskId, { enabled, recipientUserId }) {
+    let updated;
+    const data = await this.store.update(draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (!task) throw new Error('任务不存在');
+      task.wecomSync = enabled ? { enabled: true, recipientUserId, since: new Date().toISOString() } : { ...(task.wecomSync || {}), enabled: false };
+      task.updatedAt = new Date().toISOString();
+      updated = task;
+      return draft;
+    });
+    this.publish(data);
+    return updated;
+  }
+
   async setRelatedWorkspaces(taskId, names) {
     let updated;
     const data = await this.store.update(draft => {
@@ -331,6 +355,7 @@ class TaskRunner {
       return draft;
     });
     this.publish(finished);
+    if (answer?.id && answer.source !== 'connection-error') this.messageAdded(taskId, answer.id);
     const task = finished.tasks.find(item => item.id === taskId);
     if (answer && task && typeof this.onAgentAnswer === 'function') {
       const trigger = task.messages.find(item => item.id === triggerId);

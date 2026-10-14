@@ -234,6 +234,19 @@ function registerIpc() {
     return taskRunner.retry(assertString(taskId, '任务 ID', 100));
   });
 
+  ipcMain.handle('tasks:set-wecom-sync', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const taskId = assertString(input.taskId, '任务 ID', 100);
+    const enabled = input.enabled === true;
+    const recipient = enabled ? recipientUserId(input.recipientUserId) : null;
+    if (enabled) {
+      const config = await settingsService.getRuntimeConfig();
+      if (!config.wecomBotSecret && !config.wecomSecret) throw new Error('请先在设置中配置企业微信机器人或自建应用，才能同步到企微');
+    }
+    await workOps.view(actors.local(), taskId);
+    return taskRunner.setWecomSync(taskId, { enabled, recipientUserId: recipient });
+  });
+
   ipcMain.handle('tasks:set-related-spaces', async (event, input = {}) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     if (!Array.isArray(input.workspaces) || input.workspaces.length > 10) throw new Error('关联空间格式无效');
@@ -533,6 +546,7 @@ app.whenReady().then(async () => {
   wecomBot = new WecomBotBridge({ store, settingsService, taskRunner, ops: workOps, publish: publishData });
   wecomDelivery = new WecomDelivery({ store, settingsService, publish: publishData, send: (config, userId, text) => sendViaWecom(config, userId, text, wecomBot) });
   taskRunner.onAgentAnswer = event => wecomBot.sendAgentAnswer(event);
+  taskRunner.onMessageAdded = ({ taskId, messageId }) => wecomDelivery.syncMessage(taskId, messageId);
   workbuddyBridge = new WorkBuddyBridge({ userDataDir: app.getPath('userData'), store, taskRunner, ops: workOps, version: app.getVersion() });
   await taskRunner.markInterrupted();
   await wecomDelivery.markInterrupted();

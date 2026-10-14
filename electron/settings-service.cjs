@@ -56,15 +56,17 @@ function normalizeSettings(input = {}) {
   const recipientUserId = String(input.wecom?.recipientUserId ?? '').trim();
   const botId = String(input.wecom?.botId ?? '').trim();
   const messageScope = input.wecom?.messageScope || 'mentions';
+  const syncNewWorks = input.wecom?.syncNewWorks === true;
   if (organizationId.length > 120 || applicationId.length > 120 || /[\r\n]/.test(organizationId + applicationId)) throw new Error('企业微信标识无效');
   if (applicationId && !/^[1-9]\d{0,14}$/.test(applicationId)) throw new Error('企业微信 AgentID 应为数字');
   if (recipientUserId && (!/^[A-Za-z0-9._@-]{1,64}$/.test(recipientUserId) || recipientUserId.toLowerCase() === '@all')) throw new Error('企业微信收件成员 UserID 无效');
   if (botId.length > 120 || /[\r\n]/.test(botId)) throw new Error('企业微信机器人 ID 无效');
   if (!['mentions','authorized'].includes(messageScope)) throw new Error('企业微信消息范围无效');
+  if (syncNewWorks && !recipientUserId) throw new Error('开启「新工作默认同步到企微」前，请先填写默认收件成员 UserID');
   return {
     model: { provider, modelId, baseUrl },
     agent: { mode, endpoint: agentEndpoint, ...(TRANSPORTS.includes(workbuddyTransport) ? { workbuddyTransport } : {}) },
-    wecom: { organizationId, applicationId, recipientUserId, botId, messageScope },
+    wecom: { organizationId, applicationId, recipientUserId, botId, messageScope, syncNewWorks },
     workflow: normalizeWorkflow(input.workflow)
   };
 }
