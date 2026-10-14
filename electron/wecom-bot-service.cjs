@@ -33,8 +33,9 @@ function denialText(error, commandType) {
 }
 
 class WecomBotBridge {
-  constructor({ store, settingsService, taskRunner, ops, clientFactory = options => new WSClient(options), publish = () => {} }) {
-    Object.assign(this, { store, settingsService, taskRunner, clientFactory, publish });
+  constructor({ store, settingsService, taskRunner, ops, clientFactory = options => new WSClient(options), publish = () => {}, logFile = null }) {
+    Object.assign(this, { store, settingsService, taskRunner, clientFactory, publish, logFile });
+    this.log = [];
     this.ops = ops || new WorkOperations({ store, taskRunner });
     this.client = null;
     this.status = '未配置';
@@ -42,20 +43,31 @@ class WecomBotBridge {
     this.lastTextFrameStatus = '尚未收到';
   }
 
-  async restart() {
+  // Keeps the last connection events (no message content, no secrets) for diagnosis.
+  note(line) {
+    const entry = `${new Date().toISOString()} ${String(line).slice(0, 200)}`;
+    this.log.push(entry);
+    if (this.log.length > 60) this.log.splice(0, this.log.length - 60);
+    if (this.logFile) require('node:fs').promises.writeFile(this.logFile, `${this.log.join('\n')}\n`, { mode: 0o600 }).catch(() => {});
+  }
+
+  async restart(reason = 'restart') {
+    this.note(`restart (${reason})`);
     this.stop();
     this.lastTextFrameAt = null;
     this.lastTextFrameStatus = '尚未收到';
     const config = await this.settingsService.getRuntimeConfig();
-    if (!config.wecom?.botId || !config.wecomBotSecret) return this.status;
-    const quietLogger = { debug() {}, info() {}, warn() {}, error() {} };
+    if (!config.wecom?.botId || !config.wecomBotSecret) { this.note(`skip: botId=${Boolean(config.wecom?.botId)} secret=${Boolean(config.wecomBotSecret)}`); return this.status; }
+    // GONGZUO_DEBUG_WECOM=1 prints the SDK's connection log (diagnostics only).
+    const quietLogger = { debug() {}, info: (...a) => this.note(`info ${a.join(' ')}`), warn: (...a) => this.note(`warn ${a.join(' ')}`), error: (...a) => this.note(`error ${a.join(' ')}`) };
+    this.lastError = null;
     const client = this.clientFactory({ botId: config.wecom.botId, secret: config.wecomBotSecret, logger: quietLogger });
     this.client = client;
     this.status = '连接中';
-    client.on('authenticated', () => { this.status = '已连接'; });
-    client.on('disconnected', () => { this.status = '已断开，等待重连'; });
-    client.on('reconnecting', () => { this.status = '重连中'; });
-    client.on('error', () => { this.status = '连接异常'; });
+    client.on('authenticated', () => { this.status = '已连接'; this.note('status 已连接'); });
+    client.on('disconnected', reason => { this.status = '已断开，等待重连'; this.note(`status 已断开 ${String(reason || '').slice(0, 80)}`); });
+    client.on('reconnecting', () => { this.status = '重连中'; this.note('status 重连中'); });
+    client.on('error', error => { this.status = '连接异常'; this.lastError = String(error?.message || error || '').slice(0, 200); this.note(`status 连接异常 ${this.lastError}`); });
     client.on('message.text', frame => {
       this.lastTextFrameAt = new Date().toISOString();
       this.lastTextFrameStatus = '处理中';
@@ -68,7 +80,7 @@ class WecomBotBridge {
   }
 
   stop() {
-    if (this.client) { try { this.client.disconnect(); } catch {} }
+    if (this.client) { this.note('stop'); try { this.client.disconnect(); } catch {} }
     this.client = null;
     this.status = '未配置';
   }

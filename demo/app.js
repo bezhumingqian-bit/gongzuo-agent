@@ -259,6 +259,47 @@ function drawer(){
   return historyDrawer();
 }
 
+
+const progressKinds={conclusion:'结论',decision:'决定',output:'产出',blocker:'卡点',todo:'待办'};
+function shortTime(value){const date=new Date(value||Date.now());if(Number.isNaN(date.getTime()))return '';const pad=n=>String(n).padStart(2,'0');return `${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`}
+function progressTag(kind){return `<span class="progress-tag ${safe(kind)}">${safe(progressKinds[kind]||'进展')}</span>`}
+function progressAuthor(entry){return entry.author==='agent'?'Agent 提炼':state.settings?.profile?.name||'我'}
+function progressPanel(t){
+  const list=t.progress||[];
+  const drafts=list.filter(item=>item.status==='draft');
+  const published=list.filter(item=>item.status==='published').sort((a,b)=>Date.parse(b.publishedAt||b.createdAt)-Date.parse(a.publishedAt||a.createdAt));
+  const open=state.progressOpen!==false;
+  const editing=state.progressEditing;
+  const draftRow=item=>editing===item.id
+    ?`<form class="progress-row editing" data-progress-form="${safe(item.id)}">${progressTag(item.kind)}<select name="kind" aria-label="类型">${Object.entries(progressKinds).map(([key,label])=>`<option value="${key}" ${key===item.kind?'selected':''}>${label}</option>`).join('')}</select><input name="text" maxlength="120" value="${safe(item.text)}" aria-label="进展内容"><button type="button" class="dark-button" data-action="progress-save" data-id="${safe(item.id)}">保存并发布</button><button type="button" data-action="progress-cancel-edit">取消</button></form>`
+    :`<div class="progress-row draft">${progressTag(item.kind)}<span class="progress-text">${safe(item.text)}</span><span class="progress-actions"><button data-action="progress-publish" data-id="${safe(item.id)}">发布</button><button data-action="progress-edit" data-id="${safe(item.id)}">改</button><button data-action="progress-dismiss" data-id="${safe(item.id)}">忽略</button></span></div>`;
+  const shown=state.progressShowAll?published:published.slice(0,4);
+  return `<section class="progress-panel ${open?'':'collapsed'}" aria-label="这项工作的进展"><header><button class="progress-toggle" data-action="toggle-progress-panel" aria-expanded="${open?'true':'false'}">${icon(open?'down':'chevron')}<strong>进展</strong><small>${published.length?`${published.length} 条已同步给空间`:'团队看到的是这里的进展，而不是完整对话'}</small>${drafts.length?`<em>${drafts.length} 条待确认</em>`:''}</button>${open&&drafts.length>1?`<button class="soft-button" data-action="progress-publish-all">全部发布</button>`:''}</header>${open?`${drafts.length?`<div class="progress-drafts"><small>Agent 从刚才的回复里提炼了这些，确认后才会出现在空间动态里：</small>${drafts.map(draftRow).join('')}</div>`:''}${shown.length?`<div class="progress-published">${shown.map(item=>`<div class="progress-row">${progressTag(item.kind)}<span class="progress-text">${safe(item.text)}</span><small>${safe(progressAuthor(item))} · ${safe(shortTime(item.publishedAt||item.createdAt))}</small><button class="progress-undo" data-action="progress-unpublish" data-id="${safe(item.id)}" title="撤回为草稿">撤回</button></div>`).join('')}${published.length>4?`<button class="progress-more" data-action="toggle-progress-all">${state.progressShowAll?'收起':`查看全部 ${published.length} 条`}</button>`:''}</div>`:''}${!drafts.length&&!published.length?'<p class="progress-empty">Agent 每次回复后会提炼结论、决定、产出、卡点和待办，你确认后同步到空间。</p>':''}<form id="progress-add-form" class="progress-add"><select name="kind" aria-label="类型">${Object.entries(progressKinds).map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select><input name="text" maxlength="120" placeholder="手动记一条进展，例如：决定先迁移 A 区" aria-label="手动记一条进展"><button class="soft-button" type="submit">记录</button></form>`:''}</section>`;
+}
+function workLight(t){
+  const list=(t.progress||[]).filter(item=>item.status==='published');
+  const latest=[...list].sort((a,b)=>Date.parse(b.publishedAt||b.createdAt)-Date.parse(a.publishedAt||a.createdAt))[0];
+  const run=t.agentRun?.status;
+  if(t.status==='done')return {tone:'done',label:'已完成'};
+  if(run==='failed')return {tone:'red',label:'需处理'};
+  if(latest?.kind==='blocker')return {tone:'red',label:'卡住'};
+  if(['running','queued','awaiting-workbuddy'].includes(run))return {tone:'green',label:'Agent 处理中'};
+  if(t.status==='review'||t.needsMe||(t.progress||[]).some(item=>item.status==='draft'))return {tone:'amber',label:'待确认'};
+  return {tone:'green',label:'进行中'};
+}
+function spaceWarRoom(name){
+  const works=tasks.filter(t=>taskInSpace(t,name)&&!t.channelOnly).sort((a,b)=>Date.parse(b.updatedAt||b.createdAt||0)-Date.parse(a.updatedAt||a.createdAt||0));
+  const feed=works.flatMap(t=>(t.progress||[]).filter(item=>item.status==='published').map(item=>({...item,task:t}))).sort((a,b)=>Date.parse(b.publishedAt||b.createdAt)-Date.parse(a.publishedAt||a.createdAt));
+  const lights=works.map(workLight);
+  const count=tone=>lights.filter(light=>light.tone===tone).length;
+  const since=Date.now()-24*3600*1000;
+  const today=feed.filter(item=>Date.parse(item.publishedAt||item.createdAt)>=since);
+  const blockers=feed.filter(item=>item.kind==='blocker').slice(0,2);
+  const brief=works.length?`${works.length} 项工作：${count('green')} 项推进中、${count('amber')} 项待确认、${count('red')} 项卡住或需处理${count('done')?`、${count('done')} 项已完成`:''}。最近 24 小时新增 ${today.length} 条进展${blockers.length?`；最新卡点：${blockers.map(item=>`「${item.task.title}」${item.text}`).join('；')}`:''}。`:'这个空间还没有工作。在下方输入框发起第一项，Agent 的关键进展会汇总到这里。';
+  const card=t=>{const light=workLight(t);const last=[...(t.progress||[])].filter(item=>item.status==='published').sort((a,b)=>Date.parse(b.publishedAt||b.createdAt)-Date.parse(a.publishedAt||a.createdAt))[0];const doing=['running','queued'].includes(t.agentRun?.status)&&t.agentRun?.progress?t.agentRun.progress:last?`${progressKinds[last.kind]}：${last.text}`:(t.goal||'');const drafts=(t.progress||[]).filter(item=>item.status==='draft').length;return `<button class="war-card" data-action="open-task" data-id="${safe(t.id)}"><strong>${safe(t.title)}</strong><span class="war-light ${light.tone}"><i></i>${safe(light.label)} · ${safe(t.assignee?.name||state.settings?.profile?.name||'我')}</span><small>${safe(String(doing).slice(0,60))}</small>${drafts?`<em>${drafts} 条进展待确认</em>`:''}${t.workspace!==name?`<em class="war-related">来自 ${safe(t.workspace)}</em>`:''}</button>`};
+  return `<section class="war-room" aria-label="${safe(name)}作战室"><div class="war-brief"><strong>空间概况</strong><p>${safe(brief)}</p></div>${works.length?`<div class="war-grid">${works.slice(0,state.warShowAll?works.length:6).map(card).join('')}</div>${works.length>6?`<button class="progress-more" data-action="toggle-war-all">${state.warShowAll?'收起':`查看全部 ${works.length} 项工作`}</button>`:''}`:''}<div class="war-feed"><div class="war-feed-head"><strong>进展动态</strong><small>只显示已确认的结论、决定、产出、卡点和待办</small></div>${feed.length?feed.slice(0,state.feedShowAll?60:12).map(item=>`<button class="war-event" data-action="open-task" data-id="${safe(item.task.id)}">${progressTag(item.kind)}<span><b>${safe(item.task.title)}</b>：${safe(item.text)}</span><small>${safe(progressAuthor(item))} · ${safe(shortTime(item.publishedAt||item.createdAt))}</small></button>`).join('')+(feed.length>12?`<button class="progress-more" data-action="toggle-feed-all">${state.feedShowAll?'收起':`查看全部 ${feed.length} 条`}</button>`:''):'<p class="progress-empty">还没有进展。工作里的 Agent 回复后，确认提炼出的进展就会出现在这里。</p>'}</div></section>`;
+}
+
 function workspaceStage(){
   const name=state.workspace;
   const space=currentWorkspace();
@@ -270,7 +311,7 @@ function workspaceStage(){
   const shown=all.filter(document=>(state.docShowArchived?document.status==='archived':document.status==='active')&&(state.docCategory==='全部'||document.category===state.docCategory)&&(!state.docSearch||`${document.name} ${document.tags.join(' ')}`.toLowerCase().includes(state.docSearch.toLowerCase())));
   return `<main class="stage workspace-stage">
     <header class="space-stage-head"><div><span class="space-stage-mark">${safe(workspaceInitial(name))}</span><div><small>${isProject?'项目空间 / 总览':'工作空间 / 资料'}</small><h1>${safe(name)}</h1><p>${isProject?`独立的项目资料与成员${parent?` · 关联${safe(parent.name)}`:''}`:name==='公共空间'?'供公共空间中的工作使用的资料':'归属于这个团队空间的资料'}</p></div></div><div class="space-head-actions">${(isProject||space&&workspaceType(space)==='team')?`<button class="space-member-button" data-action="open-project-members">${icon('users')}成员 ${(space.members||[]).filter(member=>['active','wecom'].includes(member.status)).length}</button>`:''}<button class="dark-button" data-action="upload-documents">${icon('plus')}上传资料</button></div></header>
-    <div class="space-stage-body">${isProject?`<div class="project-context"><div><span>${icon('folder')}项目空间</span><p>${safe(space.description||'在这里集中项目任务、资料和长期记忆。')}</p><small>项目资料不自动继承关联团队的访问权限。</small></div><button class="project-start-button" data-action="start-project-work">${icon('spark')}发起项目工作</button></div>`:''}<div class="space-summary"><div><span>当前资料</span><strong>${active.length}</strong><small>按空间归档</small></div><div><span>${isProject?'项目工作':'规范与模板'}</span><strong>${isProject?projectTasks.length:active.filter(document=>['规范','模板'].includes(document.category)).length}</strong><small>${isProject?'当前设备可见':'可分类和打标签'}</small></div><div><span>${isProject?'项目成员':'资料范围'}</span><strong>${isProject?(space.members||[]).filter(member=>['active','wecom'].includes(member.status)).length:name==='公共空间'?'公共':'团队'}</strong><small>${isProject?`${(space.members||[]).filter(member=>member.status==='pending').length} 位待邀请`:'当前为本机演示'}</small></div></div>
+    <div class="space-stage-body">${spaceWarRoom(name)}${isProject?`<div class="project-context"><div><span>${icon('folder')}项目空间</span><p>${safe(space.description||'在这里集中项目任务、资料和长期记忆。')}</p><small>项目资料不自动继承关联团队的访问权限。</small></div><button class="project-start-button" data-action="start-project-work">${icon('spark')}发起项目工作</button></div>`:''}<div class="space-summary"><div><span>当前资料</span><strong>${active.length}</strong><small>按空间归档</small></div><div><span>${isProject?'项目工作':'规范与模板'}</span><strong>${isProject?projectTasks.length:active.filter(document=>['规范','模板'].includes(document.category)).length}</strong><small>${isProject?'当前设备可见':'可分类和打标签'}</small></div><div><span>${isProject?'项目成员':'资料范围'}</span><strong>${isProject?(space.members||[]).filter(member=>['active','wecom'].includes(member.status)).length:name==='公共空间'?'公共':'团队'}</strong><small>${isProject?`${(space.members||[]).filter(member=>member.status==='pending').length} 位待邀请`:'当前为本机演示'}</small></div></div>
     ${isProject?`<div class="space-section-head"><div><h2>项目工作</h2><p>在这个空间发起和追踪的工作</p></div></div><div class="project-task-list">${projectTasks.length?projectTasks.map(task=>`<button class="home-task-row" data-action="open-task" data-id="${safe(task.id)}"><i class="status-dot ${safe(task.dot)}"></i><span><strong>${safe(task.title)}</strong><small>${safe(task.meta)}</small></span>${icon('chevron')}</button>`).join(''):'<p>还没有项目工作，点击“发起项目工作”开始。</p>'}</div>`:''}
     <div class="space-section-head"><div><h2>空间资料</h2><p>上传后保存在这台 Mac；发起工作时可明确引用支持的资料正文。</p></div></div>
     <div class="doc-toolbar"><label class="doc-search">${icon('search')}<input id="doc-search" type="search" value="${safe(state.docSearch)}" placeholder="搜索文件名或标签" aria-label="搜索空间资料"></label><div class="doc-filters">${['全部','规范','模板','项目资料','其他'].map(category=>`<button class="${state.docCategory===category?'active':''}" data-action="doc-category" data-id="${category}">${category}</button>`).join('')}</div><button class="doc-archive-toggle ${state.docShowArchived?'active':''}" data-action="doc-archived">${state.docShowArchived?'返回当前资料':'查看已移出'}</button></div>
@@ -443,6 +484,7 @@ function conversation(){
   const runMessage={'awaiting-workbuddy':t.agentRun?.claimedAt?'WorkBuddy 已领取，正在处理；完成后回复会出现在这里。':'已交给 WorkBuddy，等待它通过本机连接器领取。可以在 WorkBuddy 里说「处理共作待办」。',queued:'已保存工作，等待 Agent 执行。',running:t.agentRun?.progress?`Agent 正在处理：${t.agentRun.progress}`:'Agent 正在处理，你可以先查看其他工作。',failed:t.agentRun?.message||'本次调用失败，可以重试。',interrupted:'上次执行被中断，可以重试。','not-configured':setupMessage}[run];
   return `<section class="conversation-pane">
     <div class="conversation-top"><div><strong>${safe(t.title)}</strong><span>${safe(spaceLabel(t))} · 工作对话</span></div><div class="conversation-actions-top"><button class="memory-task-button" data-action="extract-memory">${icon('book')}提炼记忆</button><button class="icon-button" data-action="toggle-people" aria-label="参与者" title="查看参与者">${icon('users')}</button>${t.id==='feedback'?`<button class="artifact-toggle ${state.artifactOpen?'active':''}" data-action="toggle-artifact">${icon('panel')}成果</button>`:''}<div class="task-menu-anchor"><button class="icon-button" data-action="toggle-task-menu" aria-label="更多任务操作" title="更多任务操作">${icon('dots')}</button>${state.quickPanel==='task-menu'?`<div class="task-menu-popover"><button data-action="extract-memory">${icon('book')}提炼记忆</button><button data-action="go-task-workspace">${icon('folder')}查看${safe(t.workspace||state.workspace)}资料</button><button data-action="show-task-info">${icon('file')}任务信息</button></div>`:''}</div></div></div>
+    ${desktopApi||t.progress?progressPanel(t):''}
     <div class="thread"><div class="message user"><span class="message-avatar">明</span><div><small>${safe(messageAuthor(t.messages?.[0]))} · 10 分钟前</small><p>${safe(userText)}</p>${t.messages?.[0]?.documentRefs?.length?`<div class="message-documents">引用资料：${safe(t.messages[0].documentRefs.map(ref=>ref.name).join("、"))}</div>`:''}${t.messages?.[0]?.mentions?.length?`<div class="mention-delivery">${icon('bell')} @${safe(t.messages[0].mentions.map(item=>item.name).join('、'))} · ${(t.messages[0].mentionDeliveries||[]).length?t.messages[0].mentionDeliveries.map(item=>item.status==='sent'?`${safe(item.name)} 已发到${safe(channelLabel[item.channel]||'企微')}`:`${safe(item.name)} ${safe(item.detail||'未送达')}`).join('；'):'等待发送'}</div>`:''}${wecomMessageAction(t.messages?.[0],t.id)}</div></div>
       ${t.id==='feedback'?channelUpdate():''}
       ${showPlaceholder?`<div class="message agent"><span class="agent-avatar">${icon('spark')}</span><div><small>团队 Agent</small><p>${safe(agentText)}</p>${progressCard(t.id)}
@@ -970,6 +1012,30 @@ root.addEventListener('click',async(event)=>{
   }
   if(action==='toggle-task-menu'){state.quickPanel=state.quickPanel==='task-menu'?null:'task-menu';render()}
   if(action==='show-task-info'){state.quickPanel='task-info';render()}
+  if(action==='toggle-progress-panel'){state.progressOpen=state.progressOpen===false;render()}
+  if(action==='toggle-progress-all'){state.progressShowAll=!state.progressShowAll;render()}
+  if(action==='toggle-war-all'){state.warShowAll=!state.warShowAll;render()}
+  if(action==='toggle-feed-all'){state.feedShowAll=!state.feedShowAll;render()}
+  if(action==='progress-edit'){state.progressEditing=id;render();root.querySelector(`[data-progress-form="${CSS.escape(id)}"] input`)?.focus()}
+  if(action==='progress-cancel-edit'){state.progressEditing=null;render()}
+  if(['progress-publish','progress-dismiss','progress-unpublish','progress-save'].includes(action)){
+    const task=tasks.find(item=>item.id===state.task);if(!task)return;
+    const form=action==='progress-save'?root.querySelector(`[data-progress-form="${CSS.escape(id)}"]`):null;
+    const values=form?new FormData(form):null;
+    const change={action:action==='progress-save'?'publish':action.replace('progress-',''),...(values?{text:values.get('text'),kind:values.get('kind')}:{})};
+    try{
+      const entry=desktopApi?await desktopApi.updateProgress({taskId:task.id,itemId:id,...change}):null;
+      const local=(task.progress||[]).find(item=>item.id===id);
+      if(local)Object.assign(local,entry||{...(values?{text:String(values.get('text')).trim(),kind:values.get('kind')}:{}),status:change.action==='publish'?'published':change.action==='dismiss'?'dismissed':'draft',publishedAt:change.action==='publish'?new Date().toISOString():local.publishedAt});
+      state.progressEditing=null;render();
+      toast(change.action==='publish'?'已同步到空间动态':change.action==='dismiss'?'已忽略':'已撤回为草稿');
+    }catch(error){toast(error?.message||'操作失败')}
+  }
+  if(action==='progress-publish-all'){
+    const task=tasks.find(item=>item.id===state.task);if(!task)return;
+    try{const result=desktopApi?await desktopApi.publishAllProgress({taskId:task.id}):null;for(const item of task.progress||[])if(item.status==='draft'){item.status='published';item.publishedAt=new Date().toISOString()}render();toast(`已发布 ${result?.published??''} 条进展`.replace('  ',' '))}
+    catch(error){toast(error?.message||'发布失败')}
+  }
   if(action==='copy-invite'){const text=inviteText(id||state.workspace);try{await navigator.clipboard.writeText(text);toast('邀请话术已复制，发给同事即可')}catch{toast(text)}}
   if((action==='approve-join'||action==='reject-join')&&desktopApi){
     const form=root.querySelector(`[data-join-form="${CSS.escape(id)}"]`);
@@ -1302,6 +1368,7 @@ root.addEventListener('submit',event=>{
   if(event.target.id==='project-member-form'){event.preventDefault();saveProjectMember(event.target)}
   if(event.target.id==='project-wecom-member-form'){event.preventDefault();linkWecomMember(event.target)}
   if(event.target.id==='project-feishu-member-form'){event.preventDefault();const values=new FormData(event.target);desktopApi.linkFeishuProjectMember({workspaceId:currentWorkspace()?.id,memberId:values.get('memberId')||undefined,name:values.get('name'),feishuId:values.get('feishuId'),role:values.get('role')}).then(data=>{applyDesktopData(data);return desktopApi.getSettings()}).then(settings=>{state.settings=settings;render();toast('已绑定飞书账号')}).catch(error=>showWorkspaceFormError(event.target,error))}
+  if(event.target.id==='progress-add-form'){event.preventDefault();const values=new FormData(event.target);const text=String(values.get('text')||'').trim();if(!text){event.target.querySelector('input')?.focus();return}const task=tasks.find(item=>item.id===state.task);if(!task)return;(desktopApi?desktopApi.addProgress({taskId:task.id,kind:values.get('kind'),text}):Promise.resolve({id:`demo-${Date.now()}`,kind:values.get('kind'),text,status:'published',author:'local-user',createdAt:new Date().toISOString(),publishedAt:new Date().toISOString()})).then(entry=>{task.progress=[...(task.progress||[]).filter(item=>item.id!==entry.id),entry];render();toast('已记录并同步到空间动态')}).catch(error=>toast(error?.message||'记录失败'))}
   if(event.target.id==='assign-task-form'){event.preventDefault();const memberId=new FormData(event.target).get('memberId');desktopApi.assignTask({taskId:state.task,memberId}).then(result=>{render();toast(result.status==='sent'?'企微接口已接受指派通知，请确认送达':result.detail||'发送结果未知')}).catch(error=>toast(error?.message||'指派失败'))}
   if(event.target.id==='memory-form'){event.preventDefault();saveMemoryDraft()}
   if(event.target.id==='settings-form'){event.preventDefault();saveSettingsForm(event.target)}

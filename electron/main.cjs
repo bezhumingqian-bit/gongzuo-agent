@@ -111,7 +111,7 @@ function registerIpc() {
   ipcMain.handle('settings:save', async (event, input) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     const result = await settingsService.save(input);
-    await wecomBot.restart();
+    await wecomBot.restart('settings-save');
     return { ...result, wecomBotStatus: wecomBot.status };
   });
 
@@ -253,6 +253,27 @@ function registerIpc() {
     const taskId = assertString(input.taskId, '任务 ID', 100);
     await workOps.view(actors.local(), taskId);
     return wecomDelivery.forwardToMembers(taskId, assertString(input.messageId, '消息 ID', 100), Array.isArray(input.memberIds) ? input.memberIds.map(id => assertString(id, '成员', 100)) : []);
+  });
+
+  ipcMain.handle('progress:update', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const taskId = assertString(input.taskId, '任务 ID', 100);
+    await workOps.resolve(actors.local(), taskId, 'work.append');
+    return taskRunner.updateProgress(taskId, assertString(input.itemId, '进展', 100), { action: input.action, text: input.text, kind: input.kind });
+  });
+
+  ipcMain.handle('progress:publish-all', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const taskId = assertString(input.taskId, '任务 ID', 100);
+    await workOps.resolve(actors.local(), taskId, 'work.append');
+    return taskRunner.publishAllProgress(taskId);
+  });
+
+  ipcMain.handle('progress:add', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const taskId = assertString(input.taskId, '任务 ID', 100);
+    await workOps.resolve(actors.local(), taskId, 'work.append');
+    return taskRunner.addProgress(taskId, { kind: input.kind, text: input.text });
   });
 
   ipcMain.handle('tasks:set-related-spaces', async (event, input = {}) => {
@@ -575,7 +596,7 @@ app.whenReady().then(async () => {
   agent.sessionsRoot = path.join(app.getPath('userData'), 'agent-sessions');
   taskRunner = new TaskRunner({ store, settingsService, personalMemoryStore, teamMemoryStore, documentService, agent, publish: publishData });
   workOps = new WorkOperations({ store, taskRunner });
-  wecomBot = new WecomBotBridge({ store, settingsService, taskRunner, ops: workOps, publish: publishData });
+  wecomBot = new WecomBotBridge({ store, settingsService, taskRunner, ops: workOps, publish: publishData, logFile: path.join(app.getPath('userData'), 'wecom-bot.log') });
   wecomDelivery = new WecomDelivery({ store, settingsService, publish: publishData, send: (config, userId, text) => sendViaWecom(config, userId, text, wecomBot), notify: async (config, member, text) => notifyMember(config, member, text, { bot: wecomBot, contacts: botContacts(await store.read()) }) });
   taskRunner.onAgentAnswer = event => wecomBot.sendAgentAnswer(event);
   workbuddyBridge = new WorkBuddyBridge({ userDataDir: app.getPath('userData'), store, taskRunner, ops: workOps, version: app.getVersion() });
@@ -584,7 +605,7 @@ app.whenReady().then(async () => {
   registerIpc();
   try { await workbuddyBridge.start(); }
   catch (error) { console.error('WorkBuddy 本机连接启动失败：', error.message); }
-  await wecomBot.restart();
+  await wecomBot.restart('startup');
   createMenu();
   createWindow();
   app.on('activate', () => {

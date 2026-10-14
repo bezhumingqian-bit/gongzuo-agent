@@ -5,6 +5,7 @@ const { resolveMentions } = require('./mention-service.cjs');
 const { asksToReadWecomInbox, wecomInboxForAgent } = require('./channel-inbox.cjs');
 const { conversationInput } = require('./connection-service.cjs');
 const { mayUsePersonalMemory } = require('./contracts/policy.cjs');
+const progress = require('./progress-service.cjs');
 
 // WorkBuddy has two transports: the official Open API (needs an OAuth token) and
 // the local MCP hand-off, where WorkBuddy pulls queued work from this app.
@@ -278,7 +279,8 @@ class TaskRunner {
         const now = Date.now();
         if (now - lastProgressAt < 1500) return;
         lastProgressAt = now;
-        this.setRunStatus(taskId, { status: 'running', triggerId, progress: String(step ? `正在：${step}` : (text || '').slice(-200)).slice(0, 240) }).catch(() => {});
+        const visible = String(text || '').replace(/<(进展|progress)>[\s\S]*$/u, '').trim();
+        this.setRunStatus(taskId, { status: 'running', triggerId, progress: String(step ? `正在：${step}` : visible.slice(-200)).slice(0, 240) }).catch(() => {});
       };
       const answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory, { onProgress });
       if (answer?.pendingFiles) await this.attachAnswerFiles(prepared.task.workspace, answer);
@@ -307,6 +309,57 @@ class TaskRunner {
     }
   }
 
+  // ---- 进展：confirm, edit, dismiss, or add by hand ----
+
+  async updateProgress(taskId, itemId, { action, text, kind } = {}) {
+    if (!['publish', 'dismiss', 'edit', 'unpublish'].includes(action)) throw new Error('进展操作无效');
+    let updated;
+    const data = await this.store.update(draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      const entry = task?.progress?.find(item => item.id === itemId);
+      if (!entry) throw new Error('进展不存在');
+      const at = new Date().toISOString();
+      if (text != null) entry.text = progress.validText(text);
+      if (kind != null) entry.kind = progress.validKind(kind);
+      if (action === 'publish') Object.assign(entry, { status: 'published', publishedAt: at });
+      if (action === 'dismiss') Object.assign(entry, { status: 'dismissed', dismissedAt: at });
+      if (action === 'unpublish') Object.assign(entry, { status: 'draft', publishedAt: null });
+      task.updatedAt = at;
+      updated = entry;
+      return draft;
+    });
+    this.publish(data);
+    return updated;
+  }
+
+  async publishAllProgress(taskId) {
+    let count = 0;
+    const data = await this.store.update(draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (!task) throw new Error('任务不存在');
+      const at = new Date().toISOString();
+      for (const entry of task.progress || []) if (entry.status === 'draft') { Object.assign(entry, { status: 'published', publishedAt: at }); count++; }
+      if (count) task.updatedAt = at;
+      return draft;
+    });
+    this.publish(data);
+    return { published: count };
+  }
+
+  async addProgress(taskId, { kind, text, author = 'local-user' }) {
+    const entry = { id: crypto.randomUUID(), kind: progress.validKind(kind), text: progress.validText(text), status: 'published', author, sourceMessageId: null, createdAt: new Date().toISOString() };
+    entry.publishedAt = entry.createdAt;
+    const data = await this.store.update(draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (!task) throw new Error('任务不存在');
+      task.progress = [...(task.progress || []), entry].slice(-200);
+      task.updatedAt = entry.createdAt;
+      return draft;
+    });
+    this.publish(data);
+    return entry;
+  }
+
   async setRelatedWorkspaces(taskId, names) {
     let updated;
     const data = await this.store.update(draft => {
@@ -323,10 +376,19 @@ class TaskRunner {
 
   async recordAnswer(taskId, triggerId, answer) {
     const failed = answer?.source === 'connection-error';
+    // Take the declared key progress out of the reply; keep it as drafts.
+    let drafts = [];
+    if (answer?.role === 'assistant' && !failed && answer.source !== 'workbuddy-pending' && typeof answer.text === 'string') {
+      const extracted = progress.extractProgress(answer.text);
+      answer.text = extracted.text;
+      const items = extracted.found ? extracted.items : progress.fallbackProgress(extracted.text, answer.artifacts || []);
+      drafts = progress.draft(items, { sourceMessageId: answer.id, author: 'agent' });
+    }
     const finished = await this.store.update(draft => {
       const current = draft.tasks.find(item => item.id === taskId);
       if (!current) return draft;
       if (answer) current.messages.push({ ...answer, replyToId: triggerId });
+      if (drafts.length) current.progress = [...(current.progress || []), ...drafts].slice(-200);
       if (answer?.agentSessionId) {
         current.agentSessionId = answer.agentSessionId;
         if ('agentSessionOwner' in answer) current.agentSessionOwner = answer.agentSessionOwner;

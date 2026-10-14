@@ -59,7 +59,7 @@ function conversationInput(messages, memoryContext) {
     : '本次输入没有附带企微来信正文。用户可以直接在窗口右上角“消息收件”查看原文；若要将某条消息长期作为当前工作的材料，可选择“作为工作材料引用”。不要声称必须引用才能看到原文。';
   const channelContext = channel ? `\n共作的企微收发记录摘要：\n机器人最近收到文本回调：${received?.at ? `${String(received.at).slice(0, 35)}，${received.chatType === 'group' ? '群聊' : '单聊'}` : '无记录'}。本机“消息收件”已保存正文的企微单聊：${Number(channel.inbox?.savedCount || 0)} 条${channel.inbox?.latestAt ? `，最近一条时间 ${String(channel.inbox.latestAt).slice(0, 35)}` : ''}。${inboxGuidance} 回调本身不能证明某位成员的某条消息已进入当前工作。\n当前工作发往企微的消息：\n${delivery.length ? delivery.join('\n') : '- 无发送记录'}。不要把“接口已接受”说成收件人已收到，也不要把收件与工作对话混为一谈。` : '';
   return {
-    instructions: `你是企业团队的工作 Agent。根据当前工作对话给出具体、可检查的下一步或结果。没有执行过的操作不能声称已完成。${context}${channelContext}`,
+    instructions: `你是企业团队的工作 Agent。根据当前工作对话给出具体、可检查的下一步或结果。没有执行过的操作不能声称已完成。${context}${channelContext}\n\n${require('./progress-service.cjs').PROGRESS_INSTRUCTION}`,
     messages: messages.filter(item => ['user', 'assistant'].includes(item.role) && item.source !== 'connection-error').slice(-12)
       .map((item, index, selected) => ({ role: item.role, content: String(item.text || '').slice(0,
         channel?.inboxSharedForThisRequest && index === selected.length - 1 && item.role === 'user' ? 16000 : 4000) }))
