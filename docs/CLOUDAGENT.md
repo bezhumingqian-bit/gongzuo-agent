@@ -1,6 +1,6 @@
 # 共作接入 CodeBuddy CloudAgent（AgentOS）方案
 
-状态：调研结论 + 接入设计（2026-10-14）。来源：iWiki「CloudAgent 接入文档」「CloudAgent 定义说明」、cnb `davidwguo/cloudagentdemos`。内部文档仅作阅读依据，此处只记录共作接入所需的要点。
+状态：已实现并真实联调（2026-10-14），见文末「实现状态」。来源：iWiki「CloudAgent 接入文档」「CloudAgent 定义说明」、cnb `davidwguo/cloudagentdemos`。内部文档仅作阅读依据，此处只记录共作接入所需的要点。
 
 ## 为什么值得接
 
@@ -45,3 +45,13 @@
 4. 资料同步与成果文件回传（E2B）。
 
 阻塞项：需要一个 codebuddy.cn API Key（用 iOA 登录创建，得到司内沙箱）。
+
+## 实现状态（2026-10-14）
+
+- `electron/cloudagent.cjs`：设置 → Agent → 「CodeBuddy 云端（CloudAgent）」。API Key 优先读共作加密存储，其次读本机钥匙串 `cn.gongzuo.codebuddy.api-key`。
+- **映射修正：一项工作 = 一个 Runtime**。实测同一 Runtime 只有一个 ACP 会话（两次 `session/new` 返回同一 ID，且等于 Runtime ID），按空间共用会把不同工作的对话串在一起。Runtime 打 `metadata.gongzuo_work` 标签，丢失会话 ID 时可按工作找回；`agentSessionId = runtimeId:sessionId`。
+- 雪花 ID（19 位）按字符串解析，避免 JSON 精度丢失。
+- `session/load` 会先回放历史 `session/update`，只收集 `session/prompt` 之后的输出（同时修复了 WorkBuddy 云端任务的同类问题）。
+- 新会话设 `acceptEdits`；权限请求中读/搜/改允许，执行、删除等拒绝并写进回复。**实测该沙箱执行只读终端命令（`ls`）未发起权限请求**，平台侧对命令的确认策略以实际为准，不能把「拒绝执行」当作强保证。
+- 真实联调：建沙箱 → 对话 19.5 s；同会话追问 6.3 s 且记得上一问；经 TaskRunner 完整链路执行「建文件并读回」15.4 s，进度显示 Write/Read，团队记忆「结论先行」生效。测试 118/118。
+- 未做：成果文件回传（E2B 文件接口）、空间资料同步进沙箱、共作内审批、沙箱回收策略（工作归档时删除 Runtime）。

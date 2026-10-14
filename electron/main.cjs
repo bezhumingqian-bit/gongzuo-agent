@@ -512,6 +512,7 @@ app.whenReady().then(async () => {
   );
   workbuddyAuth = new WorkBuddyOAuth({ settingsService, openExternal: url => shell.openExternal(url) });
   settingsService.workbuddyTokenProvider = () => workbuddyAuth.getAccessToken();
+  settingsService.cloudagentKeyFallback = require('./cloudagent.cjs').readKeychainKey;
   documentService = new DocumentService(
     path.join(app.getPath('userData'), 'documents.json'),
     path.join(app.getPath('userData'), 'documents')

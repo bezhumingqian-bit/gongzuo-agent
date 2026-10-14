@@ -3,6 +3,7 @@ const { callModel, callExternalAgent } = require('./connection-service.cjs');
 const { callCodeBuddy } = require('./codebuddy-service.cjs');
 const { callWorkBuddy } = require('./workbuddy-service.cjs');
 const { callWorkBuddyCloud } = require('./workbuddy-cloud.cjs');
+const { callCloudAgent } = require('./cloudagent.cjs');
 const { workbuddyTransport, transportOf } = require('./workbuddy-transport.cjs');
 
 // A cloud task belongs to the WorkBuddy account that created it. When someone
@@ -52,8 +53,10 @@ class AgentService {
       ? Boolean(settings.agent.endpoint)
       : ['codebuddy', 'codex', 'kimi', 'workbuddy'].includes(settings?.agent?.mode)
         ? true
+        : settings?.agent?.mode === 'cloudagent'
+          ? Boolean(settings.hasCloudagentApiKey || settings.cloudagentKeychain)
         : Boolean(settings?.model?.modelId && (settings.model.provider === 'local' || settings.hasModelKey));
-    const kind = ['external', 'codebuddy', 'workbuddy', 'codex', 'kimi'].includes(settings?.agent?.mode) ? 'agent' : 'model';
+    const kind = ['external', 'codebuddy', 'workbuddy', 'cloudagent', 'codex', 'kimi'].includes(settings?.agent?.mode) ? 'agent' : 'model';
     const checked = settings?.checks?.[kind];
     const transport = settings?.agent?.mode === 'workbuddy' ? workbuddyTransport(settings.agent, settings.hasWorkbuddyAccessToken) : null;
     const handoff = transport === 'handoff';
@@ -61,7 +64,7 @@ class AgentService {
     if (missingToken) return { mode: this.mode, label: 'WorkBuddy 待授权', modelConnected: false, detail: `WorkBuddy ${transport === 'cloud' ? '云端任务' : '本地助理'}需要开放平台访问令牌。` };
     return {
       mode: configured ? kind : this.mode,
-      label: checked?.ok ? '连接测试通过' : handoff ? 'WorkBuddy 本机连接' : transport === 'cloud' ? 'WorkBuddy 云端任务' : configured ? '已配置 · 待验证' : '本地演示模式',
+      label: checked?.ok ? '连接测试通过' : settings?.agent?.mode === 'cloudagent' ? (configured ? 'CodeBuddy 云端' : 'CodeBuddy 云端 · 缺少 API Key') : handoff ? 'WorkBuddy 本机连接' : transport === 'cloud' ? 'WorkBuddy 云端任务' : configured ? '已配置 · 待验证' : '本地演示模式',
       modelConnected: Boolean(checked?.ok),
       detail: handoff
         ? '工作会排队等待 WorkBuddy 通过本机连接器领取，处理结果回到同一项工作。'
@@ -72,6 +75,7 @@ class AgentService {
   isConfigured(config) {
     if (config?.agent?.mode === 'external') return Boolean(config.agent.endpoint);
     if (config?.agent?.mode === 'codebuddy') return true;
+    if (config?.agent?.mode === 'cloudagent') return Boolean(config.cloudagentApiKey);
     if (['codex', 'kimi'].includes(config?.agent?.mode)) return true;
     // The local MCP hand-off needs no credentials; Open API transports need a token.
     if (config?.agent?.mode === 'workbuddy') return transportOf(config) === 'handoff' || Boolean(config.workbuddyAccessToken);
@@ -88,6 +92,8 @@ class AgentService {
         ? await callExternalAgent(config, task.messages, task.workspace, memoryContext, this.fetchImpl)
         : config.agent.mode === 'codebuddy'
           ? await this.codeBuddyImpl(task.messages, task.workspace, memoryContext)
+          : config.agent.mode === 'cloudagent'
+            ? await (this.cloudAgentImpl || callCloudAgent)(config, task.messages, task.workspace, memoryContext, { sessionId: task.agentSessionId, workId: task.id, title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
           : transport === 'cloud'
             ? await (this.cloudImpl || callWorkBuddyCloud)(config, task.messages, task.workspace, memoryContext, { sessionId: cloudSessionFor(task, config), title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
           : config.agent.mode === 'workbuddy'
@@ -100,7 +106,7 @@ class AgentService {
               : await callLocalAgent(config.agent.mode, task.messages, task.workspace, memoryContext)
           : await callModel(config, task.messages, memoryContext, this.fetchImpl);
       const text = typeof result === 'string' ? result : result.text;
-      return { id: crypto.randomUUID(), role: 'assistant', text, createdAt: new Date().toISOString(), source: ['codebuddy', 'codex', 'kimi'].includes(config.agent.mode) ? config.agent.mode : config.agent.mode === 'workbuddy' ? (result.pending ? 'workbuddy-pending' : 'workbuddy') : config.agent.mode === 'external' ? 'external-agent' : 'model', ...(result.messageId ? { externalMessageId: result.messageId } : {}), ...(result.sessionId ? { agentSessionId: result.sessionId } : {}), ...(transport === 'cloud' ? { via: 'cloud-task', agentSessionOwner: config.workbuddyOpenId || null } : {}), ...(result.files?.length ? { pendingFiles: result.files, pendingFilesDirectory: result.filesDirectory } : {}) };
+      return { id: crypto.randomUUID(), role: 'assistant', text, createdAt: new Date().toISOString(), source: ['codebuddy', 'codex', 'kimi', 'cloudagent'].includes(config.agent.mode) ? config.agent.mode : config.agent.mode === 'workbuddy' ? (result.pending ? 'workbuddy-pending' : 'workbuddy') : config.agent.mode === 'external' ? 'external-agent' : 'model', ...(result.messageId ? { externalMessageId: result.messageId } : {}), ...(result.sessionId ? { agentSessionId: result.sessionId } : {}), ...(transport === 'cloud' ? { via: 'cloud-task', agentSessionOwner: config.workbuddyOpenId || null } : {}), ...(result.files?.length ? { pendingFiles: result.files, pendingFilesDirectory: result.filesDirectory } : {}) };
     } catch (error) {
       return { id: crypto.randomUUID(), role: 'assistant', text: `连接失败：${error.message}`, createdAt: new Date().toISOString(), source: 'connection-error' };
     }

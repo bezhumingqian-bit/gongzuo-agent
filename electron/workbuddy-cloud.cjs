@@ -211,6 +211,7 @@ async function callWorkBuddyCloud(config, messages, workspace, memoryContext = {
     : await createCloudTask(config, { prompt: goal, name: options.title }, fetchImpl);
   const resume = Boolean(options.sessionId);
   let text = '';
+  let prompting = false;
   const declined = [];
   const artifacts = new Map();
   const steps = [];
@@ -223,7 +224,8 @@ async function callWorkBuddyCloud(config, messages, workspace, memoryContext = {
         else artifacts.set(artifact.uri, { artifact, url: message.params.url || url });
         return;
       }
-      if (message.method !== 'session/update') return;
+      // session/load replays earlier updates first; only collect this turn's output.
+      if (message.method !== 'session/update' || !prompting) return;
       const piece = updateText(message.params);
       if (piece.kind === 'agent_message_chunk' && piece.text) {
         text = (text + piece.text).slice(0, MAX_TEXT);
@@ -246,6 +248,7 @@ async function callWorkBuddyCloud(config, messages, workspace, memoryContext = {
     await connection.open();
     await connection.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } } });
     await connection.call('session/load', { sessionId: info.taskId, cwd: '/workspace', mcpServers: [] });
+    prompting = true;
     const result = await connection.call('session/prompt', {
       sessionId: info.taskId,
       prompt: [{ type: 'text', text: buildCloudPrompt(messages, workspace, memoryContext, resume) }]

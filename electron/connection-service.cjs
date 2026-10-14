@@ -124,6 +124,7 @@ async function testConnection(kind, config, fetchImpl = fetch, codeBuddyTest) {
         ? require('./workbuddy-cloud.cjs').checkWorkBuddyCloud(config, fetchImpl)
         : require('./workbuddy-service.cjs').checkWorkBuddy(config, fetchImpl);
     }
+    if (config.agent?.mode === 'cloudagent') return require('./cloudagent.cjs').checkCloudAgent(config, fetchImpl);
     if (config.agent?.mode === 'codebuddy') {
       const test = codeBuddyTest || require('./codebuddy-service.cjs').testCodeBuddy;
       return test();

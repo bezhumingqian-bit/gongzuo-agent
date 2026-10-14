@@ -152,7 +152,7 @@ class TaskRunner {
   }
 
   async setAgent(taskId, mode) {
-    if (!['built-in', 'external', 'codebuddy', 'workbuddy', 'codex', 'kimi'].includes(mode)) throw new Error('Agent 类型无效');
+    if (!['built-in', 'external', 'codebuddy', 'workbuddy', 'cloudagent', 'codex', 'kimi'].includes(mode)) throw new Error('Agent 类型无效');
     if (this.queues.has(taskId)) throw new Error('Agent 正在处理此工作，请稍后切换');
     const data = await this.store.update(draft => {
       const task = draft.tasks.find(item => item.id === taskId);

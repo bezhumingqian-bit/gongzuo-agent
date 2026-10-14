@@ -10,7 +10,7 @@ const defaultSettings = () => ({
   workflow: defaultWorkflow(),
   checks: {}
 });
-const defaultCredentials = () => ({ modelKey: null, modelKeys: {}, agentToken: null, wecomSecret: null, wecomBotSecret: null, workbuddyAccessToken: null, workbuddyClientId: null, workbuddyClientSecret: null, workbuddyOAuth: null });
+const defaultCredentials = () => ({ modelKey: null, modelKeys: {}, agentToken: null, wecomSecret: null, wecomBotSecret: null, workbuddyAccessToken: null, workbuddyClientId: null, workbuddyClientSecret: null, workbuddyOAuth: null, cloudagentApiKey: null });
 
 const MODEL_ENDPOINTS = Object.freeze({
   openai: ['https://api.openai.com/v1'],
@@ -42,7 +42,7 @@ function normalizeSettings(input = {}) {
   const modelId = String(input.model?.modelId ?? '').trim();
   if (modelId.length > 120 || /[\r\n]/.test(modelId)) throw new Error('模型 ID 无效');
   const mode = input.agent?.mode;
-  if (!['built-in', 'external', 'codebuddy', 'workbuddy', 'codex', 'kimi'].includes(mode)) throw new Error('Agent 类型无效');
+  if (!['built-in', 'external', 'codebuddy', 'workbuddy', 'cloudagent', 'codex', 'kimi'].includes(mode)) throw new Error('Agent 类型无效');
   const baseUrl = endpoint(input.model?.baseUrl, '模型接口地址');
   if (MODEL_ENDPOINTS[provider] && !MODEL_ENDPOINTS[provider].includes(baseUrl)) {
     throw new Error('官方模型提供方只能使用对应的官方接口地址；其他服务请选择兼容模式');
@@ -82,6 +82,8 @@ class SettingsService {
     this.safeStorage = safeStorage;
     // Set by main: returns a fresh OAuth access token (refreshing if needed) or null.
     this.workbuddyTokenProvider = null;
+    // Fallback source for the CloudAgent key (macOS keychain item written at setup).
+    this.cloudagentKeyFallback = null;
   }
 
   decrypt(value) {
@@ -130,6 +132,8 @@ class SettingsService {
       hasWecomBotSecret: Boolean(credentials.wecomBotSecret),
       hasWorkbuddyAccessToken: Boolean(credentials.workbuddyAccessToken || credentials.workbuddyOAuth),
       hasWorkbuddyManualToken: Boolean(credentials.workbuddyAccessToken),
+      hasCloudagentApiKey: Boolean(credentials.cloudagentApiKey),
+      cloudagentKeychain: !credentials.cloudagentApiKey && typeof this.cloudagentKeyFallback === 'function' ? Boolean(await this.cloudagentKeyFallback().catch(() => null)) : false,
       secretStorageAvailable: Boolean(this.safeStorage.isEncryptionAvailable()),
       connectionState: 'not-tested'
     };
@@ -145,7 +149,9 @@ class SettingsService {
       try { workbuddyAccessToken = await this.workbuddyTokenProvider(); } catch { workbuddyAccessToken = null; }
       if (workbuddyAccessToken) workbuddyOpenId = (await this.readWorkbuddyOAuth())?.openId || null;
     }
-    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret: decrypt(credentials.wecomBotSecret), workbuddyAccessToken, workbuddyOpenId };
+    let cloudagentApiKey = decrypt(credentials.cloudagentApiKey);
+    if (!cloudagentApiKey && settings.agent?.mode === 'cloudagent' && typeof this.cloudagentKeyFallback === 'function') cloudagentApiKey = await this.cloudagentKeyFallback().catch(() => null);
+    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret: decrypt(credentials.wecomBotSecret), workbuddyAccessToken, workbuddyOpenId, cloudagentApiKey };
   }
 
   async save(input = {}) {
@@ -170,6 +176,8 @@ class SettingsService {
     if (workbuddyClientId && !/^[A-Za-z0-9_-]{4,100}$/.test(workbuddyClientId)) throw new Error('WorkBuddy Client ID 格式无效');
     const workbuddyClientSecret = readSecretInput(input.workbuddyClientSecret, 'WorkBuddy Client Secret');
     const clearWorkbuddyClient = input.clearWorkbuddyClient === true;
+    const cloudagentApiKey = readSecretInput(input.cloudagentApiKey, 'CodeBuddy API Key');
+    const clearCloudagentApiKey = input.clearCloudagentApiKey === true;
     if ((modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || workbuddyClientSecret) && !this.safeStorage.isEncryptionAvailable()) {
       throw new Error('macOS 安全存储当前不可用，无法保存密钥');
     }
@@ -180,7 +188,11 @@ class SettingsService {
     if (wecomBotSecret) encrypted.wecomBotSecret = this.safeStorage.encryptString(wecomBotSecret).toString('base64');
     if (workbuddyAccessToken) encrypted.workbuddyAccessToken = this.safeStorage.encryptString(workbuddyAccessToken).toString('base64');
     if (workbuddyClientSecret) encrypted.workbuddyClientSecret = this.safeStorage.encryptString(workbuddyClientSecret).toString('base64');
-    if (modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || workbuddyClientId || workbuddyClientSecret || clearWorkbuddyClient || clearModelKey || clearAgentToken || clearWecomSecret || clearWecomBotSecret || clearWorkbuddyAccessToken || previousSettings.model.provider !== settings.model.provider) {
+    if (cloudagentApiKey) {
+      if (!this.safeStorage.isEncryptionAvailable()) throw new Error('macOS 安全存储当前不可用，无法保存密钥');
+      encrypted.cloudagentApiKey = this.safeStorage.encryptString(cloudagentApiKey).toString('base64');
+    }
+    if (cloudagentApiKey || clearCloudagentApiKey || modelKey || agentToken || wecomSecret || wecomBotSecret || workbuddyAccessToken || workbuddyClientId || workbuddyClientSecret || clearWorkbuddyClient || clearModelKey || clearAgentToken || clearWecomSecret || clearWecomBotSecret || clearWorkbuddyAccessToken || previousSettings.model.provider !== settings.model.provider) {
       await this.credentials.update(current => ({
         ...current,
         modelKey: null,
@@ -193,6 +205,7 @@ class SettingsService {
         wecomSecret: clearWecomSecret ? null : encrypted.wecomSecret || current.wecomSecret,
         wecomBotSecret: clearWecomBotSecret ? null : encrypted.wecomBotSecret || current.wecomBotSecret,
         workbuddyAccessToken: clearWorkbuddyAccessToken ? null : encrypted.workbuddyAccessToken || current.workbuddyAccessToken,
+        cloudagentApiKey: clearCloudagentApiKey ? null : encrypted.cloudagentApiKey || current.cloudagentApiKey || null,
         workbuddyClientId: clearWorkbuddyClient ? null : workbuddyClientId || current.workbuddyClientId || null,
         workbuddyClientSecret: clearWorkbuddyClient ? null : encrypted.workbuddyClientSecret || current.workbuddyClientSecret || null,
         // Changing or removing the app invalidates the session issued for it.
