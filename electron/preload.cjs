@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('gongzuo', Object.freeze({
   assignTask: input => ipcRenderer.invoke('tasks:assign', input),
   retryAgent: taskId => ipcRenderer.invoke('tasks:retry-agent', taskId),
   setTaskAgent: input => ipcRenderer.invoke('tasks:set-agent', input),
+  setRelatedSpaces: input => ipcRenderer.invoke('tasks:set-related-spaces', input),
   syncWorkBuddyReply: input => ipcRenderer.invoke('tasks:sync-workbuddy-reply', input),
   setActiveWorkspace: name => ipcRenderer.invoke('workspace:set-active', name),
   createProjectWorkspace: input => ipcRenderer.invoke('workspace:create-project', input),

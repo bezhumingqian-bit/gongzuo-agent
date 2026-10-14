@@ -212,7 +212,7 @@ function registerIpc() {
     const goal = assertString(input.goal, '工作目标');
     const current = await store.read();
     const workspace = current.workspaces.some(item => item.name === input.workspace) ? input.workspace : current.activeWorkspace;
-    return workOps.create(actors.local(), { workspace, goal, documentIds: input.documentIds || [] });
+    return workOps.create(actors.local(), { workspace, goal, documentIds: input.documentIds || [], relatedWorkspaces: Array.isArray(input.relatedWorkspaces) ? input.relatedWorkspaces.slice(0, 10) : null });
   });
 
   ipcMain.handle('tasks:append-message', async (event, input = {}) => {
@@ -232,6 +232,12 @@ function registerIpc() {
   ipcMain.handle('tasks:retry-agent', async (event, taskId) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     return taskRunner.retry(assertString(taskId, '任务 ID', 100));
+  });
+
+  ipcMain.handle('tasks:set-related-spaces', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    if (!Array.isArray(input.workspaces) || input.workspaces.length > 10) throw new Error('关联空间格式无效');
+    return workOps.setRelated(actors.local(), assertString(input.taskId, '任务 ID', 100), input.workspaces.map(name => assertString(name, '工作空间', 80)));
   });
 
   ipcMain.handle('tasks:set-agent', async (event, input = {}) => {

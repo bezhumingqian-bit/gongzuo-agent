@@ -49,7 +49,8 @@ function responseText(body) {
 function conversationInput(messages, memoryContext) {
   const notes = [...(memoryContext?.personal || []), ...(memoryContext?.team || [])]
     .slice(0, 10).map(item => `- ${String(item.title || '').slice(0, 120)}: ${String(item.content || '').slice(0, 800)}`);
-  const context = notes.length ? `\n已确认的工作记忆：\n${notes.join('\n')}` : '';
+  const spaces = memoryContext?.relatedWorkspaces?.length ? `\n这项工作同时关联到：${memoryContext.relatedWorkspaces.map(name => String(name).slice(0, 60)).join('、')}；团队记忆和可引用资料包含这些空间。` : '';
+  const context = `${spaces}${notes.length ? `\n已确认的工作记忆：\n${notes.join('\n')}` : ''}`;
   const channel = memoryContext?.channelStatus;
   const received = channel?.recentRobotCallback;
   const delivery = (channel?.taskDeliveries || []).slice(-5).map(item => `- ${String(item.text || '').slice(0, 80)}：${({ sent: '企微接口已接受，未确认实际送达', failed: '企微拒绝发送', unknown: '发送结果未知', sending: '正在发送' })[item.status] || '未确认'}`);

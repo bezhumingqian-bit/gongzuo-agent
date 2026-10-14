@@ -79,6 +79,7 @@ function summarizeTask(task) {
     taskId: task.id,
     title: task.title,
     workspace: task.workspace,
+    relatedWorkspaces: task.relatedWorkspaces || [],
     status: task.status,
     agentMode: task.agentMode || null,
     agentRun: task.agentRun?.status || null,
@@ -186,7 +187,7 @@ class WorkBuddyBridge {
       if (method === 'GET' && !id) {
         const workspace = query.get('workspace');
         const limit = Math.min(Math.max(Number(query.get('limit')) || 20, 1), 50);
-        const items = data.tasks.filter(task => !task.channelOnly && (!workspace || task.workspace === workspace)).slice(0, limit).map(summarizeTask);
+        const items = data.tasks.filter(task => !task.channelOnly && (!workspace || task.workspace === workspace || (task.relatedWorkspaces || []).includes(workspace))).slice(0, limit).map(summarizeTask);
         return { items, workspaces: data.workspaces.map(space => space.name) };
       }
       if (method === 'GET' && id && !action) {

@@ -45,6 +45,19 @@ function authorize(actor, action, space) {
   return { allowed: true, role, reason: null };
 }
 
+// A work belongs to one primary space and may be related to others. Access is
+// granted by the best role across all of them: relating a work to a space is an
+// explicit decision to make it visible and usable there.
+function authorizeAny(actor, action, spaces) {
+  let fallback = { allowed: false, role: null, reason: 'no-access' };
+  for (const space of spaces.filter(Boolean)) {
+    const result = authorize(actor, action, space);
+    if (result.allowed) return result;
+    if (result.reason === 'read-only') fallback = result;
+  }
+  return fallback;
+}
+
 // Context boundary for executing Agents: personal memory belongs to the local
 // user and never follows work that a colleague started from a channel.
 const mayUsePersonalMemory = origin => !origin;
@@ -77,4 +90,4 @@ function classifyChannelEvent(event) {
   return { action: 'archive', reason: 'context-only' };
 }
 
-module.exports = { ROLE_RANK, ACTION_MIN_ROLE, actors, workspaceRole, authorize, mayUsePersonalMemory, changeRisk, classifyChannelEvent };
+module.exports = { ROLE_RANK, ACTION_MIN_ROLE, actors, workspaceRole, authorize, authorizeAny, mayUsePersonalMemory, changeRisk, classifyChannelEvent };

@@ -59,7 +59,8 @@ function extractCandidate(task) {
 
 function getApplicableMemories(personalItems, teamItems, workspaceId, ownerId = OWNER_ID) {
   const personal = personalItems.filter(item => item.status === 'active' && item.scope === 'personal' && item.ownerId === ownerId);
-  const team = teamItems.filter(item => item.status === 'active' && item.scope === 'team' && item.workspaceId === workspaceId);
+  const spaces = new Set([].concat(workspaceId).filter(Boolean));
+  const team = teamItems.filter(item => item.status === 'active' && item.scope === 'team' && spaces.has(item.workspaceId));
   return { personal, team };
 }
 

@@ -140,7 +140,7 @@ class WecomBotBridge {
       }
       if (command.type === 'view') {
         const { task } = await this.ops.view(actor, command.taskId);
-        const detail = `「${task.title}」\n空间：${task.workspace}\n状态：${task.agentRun?.status || task.status || '进行中'}\n打开：${taskLink(task.id)}`;
+        const detail = `「${task.title}」\n空间：${task.workspace}${task.relatedWorkspaces?.length ? `（关联：${task.relatedWorkspaces.join('、')}）` : ''}\n状态：${task.agentRun?.status || task.status || '进行中'}\n打开：${taskLink(task.id)}`;
         if (body.chattype === 'group') {
           await this.client.sendMessage(userId, { msgtype: 'markdown', markdown: { content: detail } });
           return reply('工作状态已发到你的企微私聊。');

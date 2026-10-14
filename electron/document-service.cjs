@@ -100,7 +100,8 @@ class DocumentService {
 
   async readForAgent(id, workspaceId) {
     const data = await this.index.read();
-    const item = data.items.find(document => document.id === id && document.status === 'active' && document.workspaceId === workspaceId);
+    const allowed = new Set([].concat(workspaceId).filter(Boolean));
+    const item = data.items.find(document => document.id === id && document.status === 'active' && allowed.has(document.workspaceId));
     if (!item) throw new Error('所选资料不存在或不属于当前空间');
     const extension = path.extname(item.name).toLowerCase();
     if (!readableExtensions.has(extension)) throw new Error(`暂不能读取 ${item.name} 的正文；请改用 PDF、Word 或文本文件`);

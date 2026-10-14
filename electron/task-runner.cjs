@@ -37,25 +37,28 @@ class TaskRunner {
     this.queues = new Map();
   }
 
-  async documentRefs(workspace, ids = []) {
+  // Documents may come from the work's primary space or any related space.
+  async documentRefs(workspace, ids = [], related = []) {
     if (!Array.isArray(ids) || ids.length > 3 || ids.some(id => typeof id !== 'string' || id.length > 100)) throw new Error('一次最多引用 3 份空间资料');
     const unique = [...new Set(ids)];
     if (!unique.length) return [];
     const data = await this.store.read();
-    const workspaceId = data.workspaces.find(item => item.name === workspace)?.id;
+    const spaceIds = new Set([workspace, ...related].map(name => data.workspaces.find(item => item.name === name)?.id).filter(Boolean));
     const documents = await this.documentService.list();
     return unique.map(id => {
-      const item = documents.find(document => document.id === id && document.workspaceId === workspaceId && document.status === 'active');
-      if (!item) throw new Error('只能引用当前空间内的有效资料');
+      const item = documents.find(document => document.id === id && spaceIds.has(document.workspaceId) && document.status === 'active');
+      if (!item) throw new Error(related.length ? '只能引用这项工作所在空间（含关联空间）内的有效资料' : '只能引用当前空间内的有效资料');
       if (!/\.(txt|md|csv|pdf|docx|doc)$/i.test(item.name)) throw new Error(`暂不能读取 ${item.name} 的正文`);
       return { id: item.id, name: item.name };
     });
   }
 
   async create(goal, workspace, documentIds = [], origin = null, options = {}) {
-    const refs = await this.documentRefs(workspace, documentIds);
+    const related = Array.isArray(options.relatedWorkspaces) ? options.relatedWorkspaces : [];
+    const refs = await this.documentRefs(workspace, documentIds, related);
     const config = await this.settingsService.getRuntimeConfig();
     const task = createLocalTask({ goal, workspace });
+    if (related.length) task.relatedWorkspaces = related;
     task.messages[0].documentRefs = refs;
     if (origin) task.messages[0].wecomOrigin = origin;
     task.agentMode = options.agentMode || config.agent.mode;
@@ -74,7 +77,7 @@ class TaskRunner {
   async append(taskId, text, mentionIds = [], documentIds = [], origin = null) {
     const taskBefore = (await this.store.read()).tasks.find(item => item.id === taskId);
     if (!taskBefore) throw new Error('任务不存在');
-    const refs = await this.documentRefs(taskBefore.workspace, documentIds);
+    const refs = await this.documentRefs(taskBefore.workspace, documentIds, taskBefore.relatedWorkspaces || []);
     let message;
     const data = await this.store.update(draft => {
       const task = draft.tasks.find(item => item.id === taskId);
@@ -197,12 +200,15 @@ class TaskRunner {
     if (!messages) return null;
     const config = { ...runtime, agent: { ...runtime.agent, mode: task.agentMode || runtime.agent.mode } };
     const workspaceId = data.workspaces.find(item => item.name === task.workspace)?.id;
+    const related = (task.relatedWorkspaces || []).map(name => data.workspaces.find(item => item.name === name)).filter(Boolean);
+    const spaceIds = [workspaceId, ...related.map(space => space.id)].filter(Boolean);
     const [personal, team] = await Promise.all([this.personalMemoryStore.read(), this.teamMemoryStore.read()]);
     const triggerMessage = task.messages.find(item => item.id === triggerId);
     const personalAllowed = mayUsePersonalMemory(triggerMessage?.wecomOrigin);
     // The local inbox is the local user's; colleagues writing in via WeCom cannot read it.
     const readWecomInbox = personalAllowed && asksToReadWecomInbox(triggerMessage?.text, messages.slice(0, -1), task.title);
-    const memory = getApplicableMemories(personalAllowed ? personal.items : [], team.items, workspaceId);
+    const memory = getApplicableMemories(personalAllowed ? personal.items : [], team.items, spaceIds);
+    if (related.length) memory.relatedWorkspaces = related.map(space => space.name);
     if (/企微|企业微信|机器人|长连接/u.test(`${task.title} ${triggerMessage?.text || ''}`) || readWecomInbox) {
       const recentWecomEvent = (data.wecomEvents || []).at(-1);
       const inbox = (data.inboundMessages || []).filter(item => item.channel === 'wecom' && item.text);
@@ -218,7 +224,7 @@ class TaskRunner {
     }
     const refs = triggerMessage?.documentRefs || [];
     let attached;
-    try { attached = await Promise.all(refs.map(ref => this.documentService.readForAgent(ref.id, workspaceId))); }
+    try { attached = await Promise.all(refs.map(ref => this.documentService.readForAgent(ref.id, spaceIds))); }
     catch (error) {
       const failure = new Error(String(error?.message || '资料读取失败，请检查资料后重试').slice(0, 180));
       failure.documentFailure = true;
@@ -292,6 +298,20 @@ class TaskRunner {
     } finally {
       if (directory) await require('node:fs/promises').rm(directory, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  async setRelatedWorkspaces(taskId, names) {
+    let updated;
+    const data = await this.store.update(draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (!task) throw new Error('任务不存在');
+      if (names.length) task.relatedWorkspaces = names; else delete task.relatedWorkspaces;
+      task.updatedAt = new Date().toISOString();
+      updated = task;
+      return draft;
+    });
+    this.publish(data);
+    return updated;
   }
 
   async recordAnswer(taskId, triggerId, answer) {
