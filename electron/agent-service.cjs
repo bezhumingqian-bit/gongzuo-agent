@@ -6,13 +6,24 @@ const { callWorkBuddyCloud } = require('./workbuddy-cloud.cjs');
 const { callCloudAgent } = require('./cloudagent.cjs');
 const { workbuddyTransport, transportOf } = require('./workbuddy-transport.cjs');
 
-// A cloud task belongs to the WorkBuddy account that created it. When someone
-// else continues a shared work, start their own cloud task (the full
-// conversation is sent again) instead of loading one their token cannot open.
+// Who a cloud session belongs to: the WorkBuddy open_id, or the CodeBuddy API
+// key id (the part before the dot; never the secret).
+function sessionOwner(config) {
+  if (config?.agent?.mode === 'cloudagent') {
+    const key = String(config.cloudagentApiKey || '');
+    if (!key) return null;
+    return key.startsWith('ck_') && key.includes('.') ? key.split('.')[0] : `key:${crypto.createHash('sha256').update(key).digest('hex').slice(0, 12)}`;
+  }
+  return config?.workbuddyOpenId || null;
+}
+
+// A cloud task / sandbox belongs to the account that created it. When someone
+// else continues a shared work, start their own (the full conversation is sent
+// again) instead of loading one their credentials cannot open.
 function cloudSessionFor(task, config) {
   if (!task.agentSessionId) return undefined;
   const owner = task.agentSessionOwner || null;
-  const current = config.workbuddyOpenId || null;
+  const current = sessionOwner(config);
   return owner && current && owner !== current ? undefined : task.agentSessionId;
 }
 const path = require('node:path');
@@ -93,7 +104,7 @@ class AgentService {
         : config.agent.mode === 'codebuddy'
           ? await this.codeBuddyImpl(task.messages, task.workspace, memoryContext)
           : config.agent.mode === 'cloudagent'
-            ? await (this.cloudAgentImpl || callCloudAgent)(config, task.messages, task.workspace, memoryContext, { sessionId: task.agentSessionId, workId: task.id, title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
+            ? await (this.cloudAgentImpl || callCloudAgent)(config, task.messages, task.workspace, memoryContext, { sessionId: cloudSessionFor(task, config), workId: task.id, title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
           : transport === 'cloud'
             ? await (this.cloudImpl || callWorkBuddyCloud)(config, task.messages, task.workspace, memoryContext, { sessionId: cloudSessionFor(task, config), title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
           : config.agent.mode === 'workbuddy'
@@ -106,7 +117,7 @@ class AgentService {
               : await callLocalAgent(config.agent.mode, task.messages, task.workspace, memoryContext)
           : await callModel(config, task.messages, memoryContext, this.fetchImpl);
       const text = typeof result === 'string' ? result : result.text;
-      return { id: crypto.randomUUID(), role: 'assistant', text, createdAt: new Date().toISOString(), source: ['codebuddy', 'codex', 'kimi', 'cloudagent'].includes(config.agent.mode) ? config.agent.mode : config.agent.mode === 'workbuddy' ? (result.pending ? 'workbuddy-pending' : 'workbuddy') : config.agent.mode === 'external' ? 'external-agent' : 'model', ...(result.messageId ? { externalMessageId: result.messageId } : {}), ...(result.sessionId ? { agentSessionId: result.sessionId } : {}), ...(transport === 'cloud' ? { via: 'cloud-task', agentSessionOwner: config.workbuddyOpenId || null } : {}), ...(result.files?.length ? { pendingFiles: result.files, pendingFilesDirectory: result.filesDirectory } : {}) };
+      return { id: crypto.randomUUID(), role: 'assistant', text, createdAt: new Date().toISOString(), source: ['codebuddy', 'codex', 'kimi', 'cloudagent'].includes(config.agent.mode) ? config.agent.mode : config.agent.mode === 'workbuddy' ? (result.pending ? 'workbuddy-pending' : 'workbuddy') : config.agent.mode === 'external' ? 'external-agent' : 'model', ...(result.messageId ? { externalMessageId: result.messageId } : {}), ...(result.sessionId ? { agentSessionId: result.sessionId } : {}), ...(transport === 'cloud' ? { via: 'cloud-task', agentSessionOwner: sessionOwner(config) } : {}), ...(config.agent.mode === 'cloudagent' ? { agentSessionOwner: sessionOwner(config) } : {}), ...(result.files?.length ? { pendingFiles: result.files, pendingFilesDirectory: result.filesDirectory } : {}) };
     } catch (error) {
       return { id: crypto.randomUUID(), role: 'assistant', text: `连接失败：${error.message}`, createdAt: new Date().toISOString(), source: 'connection-error' };
     }
@@ -120,4 +131,4 @@ class AgentService {
   }
 }
 
-module.exports = { AgentService, classifyChannelEvent, createLocalTask, cloudSessionFor };
+module.exports = { AgentService, classifyChannelEvent, createLocalTask, cloudSessionFor, sessionOwner };

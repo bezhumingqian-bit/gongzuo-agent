@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { callCloudAgent, checkCloudAgent, parseLossless, permissionReply, spaceKey, workKey, spaceManifest } = require('../electron/cloudagent.cjs');
-const { AgentService } = require('../electron/agent-service.cjs');
+const { AgentService, cloudSessionFor, sessionOwner } = require('../electron/agent-service.cjs');
 
 const BIG = '2110293515846402048';
 
@@ -161,4 +161,18 @@ test('Agent 服务：CloudAgent 需要 Key，回复标记来源并续接会话',
   assert.equal(answer.source, 'cloudagent');
   assert.equal(answer.agentSessionId, 'r:s');
   assert.equal(agent.getStatus({ agent: { mode: 'cloudagent' }, cloudagentKeychain: true }).label, 'CodeBuddy 云端');
+});
+
+test('多人：沙箱归属按 Key ID 记录（不含密钥）；同事追问别人的工作时新建自己的沙箱', async () => {
+  const mine = { agent: { mode: 'cloudagent' }, cloudagentApiKey: 'ck_me123.SECRET' };
+  const theirs = { agent: { mode: 'cloudagent' }, cloudagentApiKey: 'ck_you456.OTHER' };
+  assert.equal(sessionOwner(mine), 'ck_me123');
+  assert.ok(!sessionOwner(mine).includes('SECRET'));
+  const task = { agentSessionId: 'r1:s1', agentSessionOwner: 'ck_me123' };
+  assert.equal(cloudSessionFor(task, mine), 'r1:s1');
+  assert.equal(cloudSessionFor(task, theirs), undefined);
+  const agent = new AgentService();
+  agent.cloudAgentImpl = async () => ({ text: 'ok', sessionId: 'r2:s2' });
+  const answer = await agent.answer({ id: 'w', messages: [{ role: 'user', text: 'hi' }], workspace: '产品团队', ...task }, theirs);
+  assert.equal(answer.agentSessionOwner, 'ck_you456');
 });
