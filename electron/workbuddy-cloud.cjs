@@ -78,7 +78,10 @@ class AcpConnection {
     this.reading = this.read(response.body).catch(error => this.fail(error));
   }
 
-  async read(body) {
+  // Parses an SSE body and dispatches each JSON-RPC message. Used for the GET
+  // notification stream and for POST responses streamed as SSE (AgentOS returns
+  // session/prompt results that way).
+  async read(body, { primary = true } = {}) {
     const decoder = new TextDecoder();
     let buffer = '';
     for await (const chunk of body) {
@@ -91,7 +94,9 @@ class AcpConnection {
         if (data) this.dispatch(data);
       }
     }
-    if (!this.closed) this.fail(new Error('WorkBuddy 云端任务通道已断开'));
+    const rest = buffer.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
+    if (rest) this.dispatch(rest);
+    if (primary && !this.closed) this.fail(new Error('WorkBuddy 云端任务通道已断开'));
   }
 
   dispatch(raw) {
@@ -117,11 +122,18 @@ class AcpConnection {
   async post(payload) {
     const response = await this.fetchImpl(this.link, {
       method: 'POST', redirect: 'error',
-      headers: { ...auth(this.ticket), 'content-type': 'application/json', accept: 'application/json', ...(this.connectionId ? { 'acp-connection-id': this.connectionId } : {}) },
-      body: JSON.stringify(payload)
+      headers: { ...auth(this.ticket), 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(this.connectionId ? { 'acp-connection-id': this.connectionId } : {}) },
+      body: JSON.stringify(payload),
+      signal: this.controller.signal
     });
     if (response.status === 401) throw Object.assign(new Error('WorkBuddy 云端任务凭据已过期'), { expired: true });
+    if (response.status === 409) throw new Error('云端会话正在执行上一条请求，请稍后再试');
     if (!response.ok) throw new Error(`WorkBuddy 云端任务返回 HTTP ${response.status}`);
+    if (/text\/event-stream/i.test(response.headers.get('content-type') || '') && response.body) {
+      // Streamed reply (e.g. session/prompt): dispatch as it arrives; do not block the caller.
+      this.read(response.body, { primary: false }).catch(() => {});
+      return;
+    }
     const text = await response.text().catch(() => '');
     if (text.trim()) { try { const body = JSON.parse(text); if (body?.jsonrpc) this.dispatch(text); } catch { /* async result arrives on SSE */ } }
   }
@@ -143,6 +155,8 @@ class AcpConnection {
 
   close() {
     this.closed = true;
+    // Release the server-side connection; best effort.
+    if (this.connectionId) this.fetchImpl(this.link, { method: 'DELETE', headers: { ...auth(this.ticket), 'acp-connection-id': this.connectionId }, redirect: 'error' }).catch(() => {});
     this.controller.abort();
     this.fail(new Error('连接已关闭'));
   }
