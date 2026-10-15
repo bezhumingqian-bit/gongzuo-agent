@@ -3,6 +3,7 @@ function createSeed() {
     schemaVersion: 1,
     activeWorkspace: '产品团队',
     workspaces: [
+      { id: 'personal', name: '个人空间', type: 'personal', description: '只有你能看到。和 Agent 一起工作产生的材料都留在这里。', createdBy: 'local-user', members: [{ id: 'local-user', name: '我', role: 'owner', status: 'active' }] },
       { id: 'product', name: '产品团队', type: 'team' },
       { id: 'operations', name: '运营团队', type: 'team' },
       { id: 'public', name: '公共空间', type: 'public' }

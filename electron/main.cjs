@@ -17,7 +17,7 @@ const { testConnection } = require('./connection-service.cjs');
 const { readWorkBuddyReply } = require('./workbuddy-service.cjs');
 const { modelPortalUrl, WORKBUDDY_PORTAL } = require('./provider-links.cjs');
 const { DocumentService } = require('./document-service.cjs');
-const { createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, decideJoinRequest, removePendingProjectMember, updatePendingProjectMemberRole, migrateLegacyWorkspaceMembers } = require('./workspace-service.cjs');
+const { createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, decideJoinRequest, removePendingProjectMember, updatePendingProjectMemberRole, migrateLegacyWorkspaceMembers, ensurePersonalWorkspace, personalWorkspace } = require('./workspace-service.cjs');
 const { TaskRunner } = require('./task-runner.cjs');
 const { WecomDelivery, recipientUserId, fetchVisibleMembers, sendViaWecom } = require('./wecom-service.cjs');
 const { WecomBotBridge } = require('./wecom-bot-service.cjs');
@@ -590,9 +590,10 @@ app.whenReady().then(async () => {
     path.join(app.getPath('userData'), 'documents')
   );
   await Promise.all([store.initialize(), personalMemoryStore.initialize(), teamMemoryStore.initialize(), settingsService.initialize(), documentService.initialize()]);
-  if ((await store.read()).workspaces?.some(space => !Array.isArray(space.members))) {
-    await store.update(data => { migrateLegacyWorkspaceMembers(data); return data; });
-  }
+  { const current = await store.read();
+    if (current.workspaces?.some(space => !Array.isArray(space.members)) || !personalWorkspace(current)) {
+      await store.update(data => { migrateLegacyWorkspaceMembers(data); ensurePersonalWorkspace(data); return data; });
+    } }
   agent.sessionsRoot = path.join(app.getPath('userData'), 'agent-sessions');
   taskRunner = new TaskRunner({ store, settingsService, personalMemoryStore, teamMemoryStore, documentService, agent, publish: publishData });
   workOps = new WorkOperations({ store, taskRunner });

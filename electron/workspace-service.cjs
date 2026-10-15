@@ -2,6 +2,26 @@ const crypto = require('node:crypto');
 const { recipientUserId } = require('./wecom-service.cjs');
 
 const LOCAL_USER_ID = 'local-user';
+const PERSONAL_WORKSPACE_ID = 'personal';
+const PERSONAL_WORKSPACE_NAME = '个人空间';
+
+// Every user has exactly one private space. Materials produced while working
+// with Agents (generated files, conversations) are kept here across spaces.
+// It has no members besides the owner and cannot be shared.
+function personalWorkspace(data) {
+  return (data.workspaces || []).find(space => space.type === 'personal') || null;
+}
+
+function ensurePersonalWorkspace(data) {
+  data.workspaces ||= [];
+  if (personalWorkspace(data)) return false;
+  const taken = new Set(data.workspaces.map(space => space.name));
+  const name = taken.has(PERSONAL_WORKSPACE_NAME) ? '我的个人空间' : PERSONAL_WORKSPACE_NAME;
+  const id = data.workspaces.some(space => space.id === PERSONAL_WORKSPACE_ID) ? `personal-${crypto.randomUUID()}` : PERSONAL_WORKSPACE_ID;
+  const now = new Date().toISOString();
+  data.workspaces.unshift({ id, type: 'personal', name, description: '只有你能看到。和 Agent 一起工作产生的材料都留在这里。', createdBy: LOCAL_USER_ID, createdAt: now, members: [{ id: LOCAL_USER_ID, name: '我', role: 'owner', status: 'active', addedAt: now }] });
+  return true;
+}
 
 function migrateLegacyWorkspaceMembers(data) {
   let changed = false;
@@ -155,4 +175,4 @@ function updatePendingProjectMemberRole(data, input, actorId = LOCAL_USER_ID) {
   return member;
 }
 
-module.exports = { requestToJoin, decideJoinRequest, LOCAL_USER_ID, workspaceType, migrateLegacyWorkspaceMembers, createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, removePendingProjectMember, updatePendingProjectMemberRole };
+module.exports = { PERSONAL_WORKSPACE_ID, PERSONAL_WORKSPACE_NAME, personalWorkspace, ensurePersonalWorkspace, requestToJoin, decideJoinRequest, LOCAL_USER_ID, workspaceType, migrateLegacyWorkspaceMembers, createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, removePendingProjectMember, updatePendingProjectMemberRole };

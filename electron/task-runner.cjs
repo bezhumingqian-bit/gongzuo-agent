@@ -39,16 +39,18 @@ class TaskRunner {
   }
 
   // Documents may come from the work's primary space or any related space.
-  async documentRefs(workspace, ids = [], related = []) {
+  async documentRefs(workspace, ids = [], related = [], options = {}) {
     if (!Array.isArray(ids) || ids.length > 3 || ids.some(id => typeof id !== 'string' || id.length > 100)) throw new Error('一次最多引用 3 份空间资料');
     const unique = [...new Set(ids)];
     if (!unique.length) return [];
     const data = await this.store.read();
     const spaceIds = new Set([workspace, ...related].map(name => data.workspaces.find(item => item.name === name)?.id).filter(Boolean));
+    // My own materials can be referenced in any work I write in this app.
+    if (!options.fromChannel) for (const space of data.workspaces) if (space.type === 'personal') spaceIds.add(space.id);
     const documents = await this.documentService.list();
     return unique.map(id => {
       const item = documents.find(document => document.id === id && spaceIds.has(document.workspaceId) && document.status === 'active');
-      if (!item) throw new Error(related.length ? '只能引用这项工作所在空间（含关联空间）内的有效资料' : '只能引用当前空间内的有效资料');
+      if (!item) throw new Error(related.length ? '只能引用这项工作所在空间（含关联空间）或个人空间内的有效资料' : '只能引用当前空间或个人空间内的有效资料');
       if (!/\.(txt|md|csv|pdf|docx|doc)$/i.test(item.name)) throw new Error(`暂不能读取 ${item.name} 的正文`);
       return { id: item.id, name: item.name };
     });
@@ -56,7 +58,7 @@ class TaskRunner {
 
   async create(goal, workspace, documentIds = [], origin = null, options = {}) {
     const related = Array.isArray(options.relatedWorkspaces) ? options.relatedWorkspaces : [];
-    const refs = await this.documentRefs(workspace, documentIds, related);
+    const refs = await this.documentRefs(workspace, documentIds, related, { fromChannel: Boolean(origin) });
     const config = await this.settingsService.getRuntimeConfig();
     const task = createLocalTask({ goal, workspace });
     if (related.length) task.relatedWorkspaces = related;
@@ -83,7 +85,7 @@ class TaskRunner {
   async append(taskId, text, mentionIds = [], documentIds = [], origin = null) {
     const taskBefore = (await this.store.read()).tasks.find(item => item.id === taskId);
     if (!taskBefore) throw new Error('任务不存在');
-    const refs = await this.documentRefs(taskBefore.workspace, documentIds, taskBefore.relatedWorkspaces || []);
+    const refs = await this.documentRefs(taskBefore.workspace, documentIds, taskBefore.relatedWorkspaces || [], { fromChannel: Boolean(origin) });
     let message;
     const data = await this.store.update(draft => {
       const task = draft.tasks.find(item => item.id === taskId);
@@ -232,7 +234,9 @@ class TaskRunner {
     }
     const refs = triggerMessage?.documentRefs || [];
     let attached;
-    try { attached = await Promise.all(refs.map(ref => this.documentService.readForAgent(ref.id, spaceIds))); }
+    // Personal-space materials follow only messages written by the local user.
+    const docSpaceIds = personalAllowed ? [...spaceIds, ...data.workspaces.filter(space => space.type === 'personal').map(space => space.id)] : spaceIds;
+    try { attached = await Promise.all(refs.map(ref => this.documentService.readForAgent(ref.id, docSpaceIds))); }
     catch (error) {
       const failure = new Error(String(error?.message || '资料读取失败，请检查资料后重试').slice(0, 180));
       failure.documentFailure = true;
@@ -283,28 +287,46 @@ class TaskRunner {
         this.setRunStatus(taskId, { status: 'running', triggerId, progress: String(step ? `正在：${step}` : visible.slice(-200)).slice(0, 240) }).catch(() => {});
       };
       const answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory, { onProgress });
-      if (answer?.pendingFiles) await this.attachAnswerFiles(prepared.task.workspace, answer);
+      if (answer?.pendingFiles) await this.attachAnswerFiles(prepared.task, answer);
       await this.recordAnswer(taskId, triggerId, answer);
     } catch (error) {
       await this.setRunStatus(taskId, { status: 'failed', triggerId, message: 'Agent 执行中断，请重试' });
     }
   }
 
-  // Files produced by an Agent become space documents so the team keeps them.
-  async attachAnswerFiles(workspace, answer) {
+  // Files produced by an Agent are always kept in the personal space (the
+  // process belongs to the person) and, when the work lives in a team or
+  // project space, also stored there (the result belongs to the team).
+  async attachAnswerFiles(task, answer) {
     const files = answer.pendingFiles || [];
     const directory = answer.pendingFilesDirectory;
     delete answer.pendingFiles;
     delete answer.pendingFilesDirectory;
+    const problems = [];
     try {
+      if (!files.length || typeof this.documentService?.upload !== 'function') return;
       const data = await this.store.read();
-      const workspaceId = data.workspaces.find(item => item.name === workspace)?.id;
-      if (!workspaceId || !files.length || typeof this.documentService?.upload !== 'function') return;
-      const saved = await this.documentService.upload(workspaceId, files.slice(0, 10).map(file => file.path));
-      answer.artifacts = saved.map(item => ({ id: item.id, name: item.name }));
+      const space = data.workspaces.find(item => item.name === task.workspace);
+      const personal = data.workspaces.find(item => item.type === 'personal');
+      const paths = files.slice(0, 10).map(file => file.path);
+      const origin = { taskId: task.id, taskTitle: task.title || task.goal, workspace: task.workspace, agent: answer.source, messageId: answer.id };
+      if (space && space.type !== 'personal') {
+        try {
+          const saved = await this.documentService.upload(space.id, paths);
+          answer.artifacts = saved.map(item => ({ id: item.id, name: item.name }));
+        } catch (error) { problems.push(`未能存入${space.name}资料：${String(error?.message || '未知错误').slice(0, 120)}`); }
+      }
+      if (personal) {
+        try {
+          const kept = await this.documentService.upload(personal.id, paths, { origin });
+          answer.personalArtifacts = kept.map(item => ({ id: item.id, name: item.name }));
+          if (space?.type === 'personal') answer.artifacts = answer.personalArtifacts;
+        } catch (error) { problems.push(`未能留存到个人空间：${String(error?.message || '未知错误').slice(0, 120)}`); }
+      }
     } catch (error) {
-      answer.text = `${answer.text}\n\n（生成的文件未能存入空间资料：${String(error?.message || '未知错误').slice(0, 120)}）`;
+      problems.push(`未能保存：${String(error?.message || '未知错误').slice(0, 120)}`);
     } finally {
+      if (problems.length) answer.text = `${answer.text}\n\n（生成的文件${problems.join('；')}）`;
       if (directory) await require('node:fs/promises').rm(directory, { recursive: true, force: true }).catch(() => {});
     }
   }
@@ -467,7 +489,7 @@ class TaskRunner {
     const answer = { id: crypto.randomUUID(), role: 'assistant', text: reply, createdAt: new Date().toISOString(), source: 'workbuddy', via: 'local-mcp' };
     if (files.length) {
       answer.pendingFiles = files.map(file => ({ path: file }));
-      await this.attachAnswerFiles(task.workspace, answer);
+      await this.attachAnswerFiles(task, answer);
     }
     await this.recordAnswer(taskId, triggerId, answer);
     return { taskId, messageId: answer.id, files: answer.artifacts || [] };

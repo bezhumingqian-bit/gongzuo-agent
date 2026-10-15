@@ -53,6 +53,7 @@ class WorkOperations {
     return unique.map(name => {
       const space = data.workspaces.find(item => item.name === name);
       if (!space) throw new WorkError('workspace-not-found', `工作空间不存在：${name}`);
+      if (space.type === 'personal') throw new WorkError('invalid-related', '个人空间不能作为关联空间；你的所有工作已自动留在个人空间');
       this.check(actor, 'work.create', space);
       return space.name;
     });

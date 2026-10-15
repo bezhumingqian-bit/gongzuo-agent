@@ -24,6 +24,8 @@ const actors = {
 
 function workspaceRole(space, actor) {
   if (!space || !actor) return null;
+  // The personal space is the local user's alone (WorkBuddy acts as their delegate).
+  if (space.type === 'personal' && !['local', 'workbuddy'].includes(actor.type)) return null;
   if (actor.type === 'local') return 'owner';
   if (actor.type === 'workbuddy') return 'editor';
   if (actor.type === 'rule') return space.id === actor.workspaceId ? 'editor' : null;

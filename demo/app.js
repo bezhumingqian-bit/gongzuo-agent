@@ -61,9 +61,12 @@ const state = {
   workspace:'产品团队',
   messages:[],
   agentStatus:null,
-  workspaces:[{id:'product',name:'产品团队',type:'team'},{id:'operations',name:'运营团队',type:'team'},{id:'public',name:'公共空间',type:'public'}],
+  workspaces:[{id:'personal',name:'个人空间',type:'personal'},{id:'product',name:'产品团队',type:'team'},{id:'operations',name:'运营团队',type:'team'},{id:'public',name:'公共空间',type:'public'}],
   projectDialog:false,
   memberPanel:false,
+  personalTab:'produced',
+  personalSearch:'',
+  personalShowAll:false,
   memories:{personal:[],team:[]},
   memoryPanel:false,
   memoryScope:'personal',
@@ -138,7 +141,9 @@ function applyDesktopData(data){
 }
 
 function trafficLights(){return `<div class="traffic"><i></i><i></i><i></i></div>`}
-function workspaceInitial(name){return ({产品团队:'产',运营团队:'运',公共空间:'公'})[name]||String(name||'空').slice(0,1)}
+function workspaceInitial(name){return state.workspaces.find(space=>space.name===name)?.type==='personal'?'我':({产品团队:'产',运营团队:'运',公共空间:'公'})[name]||String(name||'空').slice(0,1)}
+function personalSpace(){return state.workspaces.find(space=>space.type==='personal')}
+function isPersonalName(name){return Boolean(name)&&personalSpace()?.name===name}
 function workspaceType(space){return space.type||(space.id==='public'?'public':'team')}
 function taskSpaceNames(task){return task?[task.workspace,...(task.relatedWorkspaces||[])].filter(Boolean):[]}
 function taskInSpace(task,name){return Boolean(task)&&(task.workspace===name||(task.relatedWorkspaces||[]).includes(name))}
@@ -212,7 +217,7 @@ function historyDrawer(){
   }
   const row=task=>`<button class="task-item ${state.task===task.id?'active':''}" data-action="open-task" data-id="${safe(task.id)}"><span class="status-dot ${safe(task.dot)}"></span><span><strong>${safe(task.title)}</strong><small>${safe(task.meta)}</small></span></button>`;
   const openGroups=state.historyOpenGroups===null?groups.slice(0,1).map(group=>group.name):state.historyOpenGroups;
-  const recentContent=groups.map(group=>{const open=openGroups.includes(group.name);const space=state.workspaces.find(item=>item.name===group.name);return `<div class="history-group"><button class="history-group-head ${open?'open':''}" data-action="toggle-history-group" data-id="${safe(group.name)}" aria-expanded="${open?'true':'false'}"><span class="history-group-avatar ${space&&workspaceType(space)==='project'?'project':''}">${safe(workspaceInitial(group.name))}</span><span class="history-group-copy"><strong>${safe(group.name)}</strong><small>${group.items.length} 项工作 · 最近：${safe(group.items[0].title)}</small></span>${icon('chevron')}</button>${open?(()=>{const expanded=(state.historyExpanded||[]).includes(group.name);const shown=expanded?group.items:group.items.slice(0,4);return `<div class="history-group-items">${shown.map(row).join('')}${group.items.length>4?`<button class="history-group-more" data-action="expand-history-group" data-id="${safe(group.name)}" aria-expanded="${expanded?'true':'false'}">${expanded?'收起':`展开其余 ${group.items.length-4} 项`}${icon('down')}</button>`:''}</div>`})():''}</div>`}).join('');
+  const recentContent=groups.map(group=>{const open=openGroups.includes(group.name);const space=state.workspaces.find(item=>item.name===group.name);return `<div class="history-group"><button class="history-group-head ${open?'open':''}" data-action="toggle-history-group" data-id="${safe(group.name)}" aria-expanded="${open?'true':'false'}"><span class="history-group-avatar ${space&&workspaceType(space)==='project'?'project':space&&workspaceType(space)==='personal'?'personal':''}">${safe(workspaceInitial(group.name))}</span><span class="history-group-copy"><strong>${safe(group.name)}</strong><small>${group.items.length} 项工作 · 最近：${safe(group.items[0].title)}</small></span>${icon('chevron')}</button>${open?(()=>{const expanded=(state.historyExpanded||[]).includes(group.name);const shown=expanded?group.items:group.items.slice(0,4);return `<div class="history-group-items">${shown.map(row).join('')}${group.items.length>4?`<button class="history-group-more" data-action="expand-history-group" data-id="${safe(group.name)}" aria-expanded="${expanded?'true':'false'}">${expanded?'收起':`展开其余 ${group.items.length-4} 项`}${icon('down')}</button>`:''}</div>`})():''}</div>`}).join('');
   return `<aside class="drawer">
   <div class="drawer-head"><strong>我的工作</strong><button class="icon-button" data-action="search" aria-label="搜索">${icon('search')}</button></div>
   <p class="drawer-scope">${state.workFilter==='recent'?'按项目或团队收拢我参与的工作；后续对话留在工作内。':'需要你确认或补充的工作'}</p>
@@ -223,12 +228,13 @@ function historyDrawer(){
 
 function teamDrawer(){
   const spaces=state.workspaces;
-  const groups={team:spaces.filter(space=>workspaceType(space)==='team'),project:spaces.filter(space=>workspaceType(space)==='project'),public:spaces.filter(space=>workspaceType(space)==='public')};
+  const groups={personal:spaces.filter(space=>workspaceType(space)==='personal'),team:spaces.filter(space=>workspaceType(space)==='team'),project:spaces.filter(space=>workspaceType(space)==='project'),public:spaces.filter(space=>workspaceType(space)==='public')};
   const count=documentCount(state.workspace);
-  const row=(space,index)=>`<button class="space-row ${state.workspace===space.name?'active':''}" data-action="switch-workspace" data-id="${safe(space.name)}"><span class="space-avatar ${workspaceType(space)==='project'?'project-avatar':`s${index}`}">${safe(workspaceInitial(space.name))}</span><span><strong>${safe(space.name)}</strong><small>${workspaceType(space)==='project'?`${(space.members||[]).filter(member=>['active','wecom'].includes(member.status)).length} 位成员 · `:''}${documentCount(space.name)} 份资料${workspaceType(space)==='public'?' · 本机公共范围':''}</small></span>${state.workspace===space.name?icon('check'):''}</button>`;
+  const row=(space,index)=>`<button class="space-row ${state.workspace===space.name?'active':''}" data-action="switch-workspace" data-id="${safe(space.name)}"><span class="space-avatar ${workspaceType(space)==='project'?'project-avatar':workspaceType(space)==='personal'?'personal-avatar':`s${index}`}">${safe(workspaceInitial(space.name))}</span><span><strong>${safe(space.name)}</strong><small>${workspaceType(space)==='personal'?'仅自己可见 · ':''}${workspaceType(space)==='project'?`${(space.members||[]).filter(member=>['active','wecom'].includes(member.status)).length} 位成员 · `:''}${documentCount(space.name)} 份资料${workspaceType(space)==='public'?' · 本机公共范围':''}</small></span>${state.workspace===space.name?icon('check'):''}</button>`;
   return `<aside class="drawer">
     <div class="drawer-head"><strong>工作空间</strong><div class="drawer-head-actions"><button class="drawer-create-project" data-action="open-project-dialog">${icon('plus')}新建项目</button><button class="icon-button" data-action="search" aria-label="搜索">${icon('search')}</button></div></div>
     <p class="drawer-copy">按团队或项目组织工作与资料，空间成员单独管理。</p>
+    ${groups.personal.map(row).join('')}
     <div class="drawer-label">团队空间</div>
     ${groups.team.map(row).join('')}
     <div class="drawer-label">项目空间</div>
@@ -239,7 +245,7 @@ function teamDrawer(){
     <div class="context-summary"><div>${icon('book')}<span><strong>${count} 份空间资料</strong><small>可在右侧上传、分类和管理</small></span></div><div>${icon('comment')}<span><strong>消息来源尚未接入</strong><small>飞书、企业微信和邮件留待后续配置</small></span></div></div>
     <div class="drawer-label">长期记忆</div>
     <button class="memory-entry" data-action="open-memory" data-id="personal">${icon('user')}<span><strong>个人记忆</strong><small>只供你使用，跨工作空间保留</small></span>${icon('chevron')}</button>
-    <button class="memory-entry" data-action="open-memory" data-id="team">${icon('users')}<span><strong>团队记忆</strong><small>${safe(state.workspace)}的约定、流程和项目背景</small></span>${icon('chevron')}</button>
+    ${isPersonalName(state.workspace)?'':`<button class="memory-entry" data-action="open-memory" data-id="team">${icon('users')}<span><strong>团队记忆</strong><small>${safe(state.workspace)}的约定、流程和项目背景</small></span>${icon('chevron')}</button>`}
     <p class="context-note">切换空间会改变新工作的资料范围，不会移动已有工作。当前空间资料只保存在这台 Mac 上。</p>
   </aside>`;
 }
@@ -321,9 +327,41 @@ function spaceWarRoom(name){
   return `<section class="war-room" aria-label="${safe(name)}作战室"><div class="war-brief"><strong>空间概况</strong><p>${safe(brief)}</p></div>${works.length?`<div class="war-grid">${works.slice(0,state.warShowAll?works.length:6).map(card).join('')}</div>${works.length>6?`<button class="progress-more" data-action="toggle-war-all">${state.warShowAll?'收起':`查看全部 ${works.length} 项工作`}</button>`:''}`:''}<div class="war-feed"><div class="war-feed-head"><strong>进展动态</strong><small>只显示已确认的结论、决定、产出、卡点和待办</small></div>${feed.length?feed.slice(0,state.feedShowAll?60:12).map(item=>`<button class="war-event" data-action="open-task" data-id="${safe(item.task.id)}">${progressTag(item.kind)}<span><b>${safe(item.task.title)}</b>：${safe(item.text)}</span><small>${safe(progressAuthor(item))} · ${safe(shortTime(item.publishedAt||item.createdAt))}</small></button>`).join('')+(feed.length>12?`<button class="progress-more" data-action="toggle-feed-all">${state.feedShowAll?'收起':`查看全部 ${feed.length} 条`}</button>`:''):'<p class="progress-empty">还没有进展。工作里的 Agent 回复后，确认提炼出的进展就会出现在这里。</p>'}</div></section>`;
 }
 
+const agentSourceLabel=source=>({codebuddy:'CodeBuddy',codex:'Codex',kimi:'Kimi Code',workbuddy:'WorkBuddy',cloudagent:'CodeBuddy 云端','external-agent':'外部 Agent'})[source]||'Agent';
+// 个人空间：和 Agent 工作产生的材料（生成的文件、对话）跨空间留在这里，只有自己可见。
+function personalStage(space){
+  const name=space.name;
+  const query=state.personalSearch.trim().toLowerCase();
+  const docs=state.documents.filter(document=>document.workspaceId===space.id);
+  const produced=docs.filter(document=>document.origin?.kind==='agent');
+  const uploaded=docs.filter(document=>document.origin?.kind!=='agent');
+  const visibleDocs=list=>list.filter(document=>(state.docShowArchived?document.status==='archived':document.status==='active')&&(!query||`${document.name} ${(document.tags||[]).join(' ')} ${document.origin?.taskTitle||''} ${document.origin?.workspace||''}`.toLowerCase().includes(query)));
+  const talks=tasks.filter(task=>!task.channelOnly&&(task.messages?.length||!desktopApi)).map(task=>{
+    const replies=(task.messages||[]).filter(message=>message.role==='assistant');
+    const hit=query?(task.messages||[]).find(message=>String(message.text||'').toLowerCase().includes(query)):null;
+    return {task,replies,hit,time:Date.parse(task.updatedAt||task.createdAt||'')||0};
+  }).filter(item=>!query||item.hit||`${item.task.title} ${item.task.workspace}`.toLowerCase().includes(query)).sort((a,b)=>b.time-a.time);
+  const tab=state.personalTab;
+  const count=list=>list.filter(document=>document.status==='active').length;
+  const snippet=(text,needle)=>{const plain=String(text||'').replace(/\s+/g,' ').trim();if(!needle)return plain.slice(0,90);const at=plain.toLowerCase().indexOf(needle);return (at>30?'…':'')+plain.slice(Math.max(0,at-30),at+60)};
+  const docRow=document=>`<article class="doc-row"><span class="doc-file-icon">${icon('file')}</span><div class="doc-info"><strong>${safe(document.name)}</strong><small>${document.origin?`${[document.origin.workspace&&!isPersonalName(document.origin.workspace)?safe(document.origin.workspace):'',document.origin.taskTitle?`「${safe(document.origin.taskTitle)}」`:'',safe(agentSourceLabel(document.origin.agent))].filter(Boolean).join(' · ')} · `:`${safe(document.category)} · `}${formatSize(document.size)} · ${new Date(document.createdAt).toLocaleDateString('zh-CN')}${document.status==='archived'?' · 已移出':''}</small></div><div class="doc-actions">${document.status==='active'?`<button data-action="open-document" data-id="${safe(document.id)}">打开</button>${document.origin?.taskId&&tasks.some(task=>task.id===document.origin.taskId)?`<button data-action="open-task" data-id="${safe(document.origin.taskId)}">回到工作</button>`:`<button data-action="edit-document" data-id="${safe(document.id)}">分类与标签</button>`}<button data-action="archive-document" data-id="${safe(document.id)}">移出</button>`:`<button data-action="restore-document" data-id="${safe(document.id)}">恢复</button>`}</div></article>`;
+  const empty=(title,detail)=>`<div class="doc-empty">${icon('folder')}<strong>${title}</strong><span>${detail}</span></div>`;
+  const body=tab==='talks'
+    ?(talks.length?talks.slice(0,state.personalShowAll?talks.length:30).map(({task,replies,hit})=>`<button class="personal-talk" data-action="open-task" data-id="${safe(task.id)}"><span class="status-dot ${safe(task.dot)}"></span><span><strong>${safe(task.title)}</strong><small>${safe(task.workspace||'')} · ${replies.length?`${replies.length} 条 Agent 回复`:'还没有 Agent 回复'} · ${safe(shortTime(task.updatedAt||task.createdAt))}</small><em>${safe(snippet(hit?hit.text:replies.at(-1)?.text||task.goal,hit?query:''))}</em></span>${icon('chevron')}</button>`).join('')+(talks.length>30?`<button class="progress-more" data-action="toggle-personal-all">${state.personalShowAll?'收起':`查看全部 ${talks.length} 项`}</button>`:''):empty(query?'没有符合条件的对话':'还没有和 Agent 的对话','在任何空间发起工作，对话都会留在这里。'))
+    :(()=>{const list=visibleDocs(tab==='uploaded'?uploaded:produced);return list.length?list.map(docRow).join(''):empty(state.docShowArchived?'没有已移出的材料':query?'没有符合条件的材料':tab==='uploaded'?'还没有上传的资料':'还没有 Agent 生成的文件',tab==='uploaded'?'上传只给自己用的资料，任何空间的工作都能引用。':'Agent 在任何空间生成的文件，都会在这里留一份。')})();
+  return `<main class="stage workspace-stage personal-stage">
+    <header class="space-stage-head"><div><span class="space-stage-mark personal-mark">我</span><div><small>个人空间 · 仅自己可见</small><h1>${safe(name)}</h1><p>和 Agent 一起工作产生的材料都留在这里，跨所有空间保留。团队空间只收到结果。</p></div></div><div class="space-head-actions"><button class="dark-button" data-action="upload-documents">${icon('plus')}上传资料</button></div></header>
+    <div class="space-stage-body">
+    <div class="doc-toolbar"><div class="doc-filters">${[['produced','Agent 产出',count(produced)],['talks','对话记录',talks.length],['uploaded','我上传的',count(uploaded)]].map(([id,label,n])=>`<button class="${tab===id?'active':''}" data-action="personal-tab" data-id="${id}">${label} <span class="personal-count">${n}</span></button>`).join('')}</div><label class="doc-search">${icon('search')}<input id="personal-search" type="search" value="${safe(state.personalSearch)}" placeholder="${tab==='talks'?'搜索工作标题或对话内容':'搜索文件名或来源工作'}" aria-label="搜索个人空间"></label>${tab==='talks'?'':`<button class="doc-archive-toggle ${state.docShowArchived?'active':''}" data-action="doc-archived">${state.docShowArchived?'返回当前材料':'查看已移出'}</button>`}</div>
+    <div class="doc-list">${body}</div>
+    <p class="space-local-note">个人空间只保存在这台 Mac，不会同步给任何同事。团队空间里生成的文件会同时存入该空间资料；在这里移出不影响团队那份。</p></div>
+  </main>`;
+}
+
 function workspaceStage(){
   const name=state.workspace;
   const space=currentWorkspace();
+  if(space&&workspaceType(space)==='personal')return personalStage(space);
   const isProject=space&&workspaceType(space)==='project';
   const parent=space?.parentWorkspaceId?state.workspaces.find(item=>item.id===space.parentWorkspaceId):null;
   const projectTasks=isProject?tasks.filter(task=>taskInSpace(task,name)):[];
@@ -375,14 +413,14 @@ function composer(id='home-input', compact=false){
   const taskWorkspace=state.view==='task'&&state.task?tasks.find(task=>task.id===state.task)?.workspace:null;
   const shownWorkspace=taskWorkspace||state.workspace;
   const selected=state.composerDocuments[id]||[];
-  const pickerSpaceIds=(taskWorkspace?taskSpaceNames(tasks.find(task=>task.id===state.task)):[shownWorkspace,...state.composerRelated]).map(name=>activeWorkspaceId(name));const available=state.documents.filter(document=>pickerSpaceIds.includes(document.workspaceId)&&document.status==='active'&&/\.(txt|md|csv|pdf|docx|doc)$/i.test(document.name));
+  const pickerSpaceIds=[...(taskWorkspace?taskSpaceNames(tasks.find(task=>task.id===state.task)):[shownWorkspace,...state.composerRelated]).map(name=>activeWorkspaceId(name)),personalSpace()?.id].filter(Boolean);const personalId=personalSpace()?.id;const pickerNames=new Set(state.workspaces.filter(space=>pickerSpaceIds.includes(space.id)&&space.id!==personalId).map(space=>space.name));const available=state.documents.filter(document=>pickerSpaceIds.includes(document.workspaceId)&&document.status==='active'&&/\.(txt|md|csv|pdf|docx|doc)$/i.test(document.name)&&!(document.workspaceId===personalId&&pickerNames.has(document.origin?.workspace)));
   return `<div class="composer ${compact?'compact':''}">
   <textarea id="${id}" aria-label="${compact?'工作消息':'新工作'}" placeholder="${compact?'继续交代 Agent；输入 @ 可同时通知同事…':'告诉 Agent 你的目标；输入 @ 可同时通知同事…'}">${safe(state.composerDrafts[id]||'')}</textarea>
   ${state.mentionMenu&&state.mentionInput===id?mentionPicker(id):''}
   ${selected.length?`<div class="composer-document-refs">${selected.map(docId=>{const doc=state.documents.find(item=>item.id===docId);return doc?`<button data-action="select-document" data-id="${safe(docId)}" data-input="${id}" title="移除引用">${icon('file')}${safe(doc.name)} ×</button>`:''}).join('')}</div>`:''}
-  ${state.documentPicker===id?`<div class="composer-document-picker"><strong>引用${safe(shownWorkspace)}的资料</strong><small>只把你选中的正文发送给当前 Agent；最多 3 份，每份取前 12000 字。</small>${available.length?available.map(doc=>`<button data-action="select-document" data-id="${safe(doc.id)}" data-input="${id}">${icon('file')}<span>${safe(doc.name)}</span>${selected.includes(doc.id)?icon('check'):''}</button>`).join(''):'<p>当前空间没有可引用的 PDF、Word 或文本资料。</p>'}</div>`:''}
+  ${state.documentPicker===id?`<div class="composer-document-picker"><strong>引用资料</strong><small>${isPersonalName(shownWorkspace)?'个人空间':`${safe(shownWorkspace)}与个人空间`}的资料；只把你选中的正文发送给当前 Agent，最多 3 份，每份取前 12000 字。</small>${available.length?available.map(doc=>`<button data-action="select-document" data-id="${safe(doc.id)}" data-input="${id}">${icon('file')}<span>${safe(doc.name)}</span>${doc.workspaceId===personalId&&!isPersonalName(shownWorkspace)?'<small class="doc-scope-note">个人</small>':''}${selected.includes(doc.id)?icon('check'):''}</button>`).join(''):'<p>当前空间和个人空间都没有可引用的 PDF、Word 或文本资料。</p>'}</div>`:''}
   ${state.recentAttachment?.workspace===shownWorkspace?`<div class="composer-attachment">${icon('file')}<span>${safe(state.recentAttachment.name)} 已加入${safe(shownWorkspace)}资料</span><button data-action="view-attached-document">查看</button></div>`:''}
-  <div class="composer-bar"><div><button class="composer-tool" data-action="upload-from-composer" aria-label="上传文件到当前空间资料" title="上传到当前空间资料">${icon('paperclip')}</button><button class="composer-doc-button" data-action="toggle-document-picker" data-id="${id}" aria-label="引用空间资料" aria-expanded="${state.documentPicker===id?'true':'false'}">${icon('file')}引用资料</button><button class="mention-trigger" data-action="toggle-mentions" data-input="${id}" aria-label="@ 同事" aria-expanded="${state.mentionMenu&&state.mentionInput===id?'true':'false'}">@ 同事</button><div class="composer-space-anchor">${(()=>{const currentTask=taskWorkspace?tasks.find(task=>task.id===state.task):null;const related=currentTask?(currentTask.relatedWorkspaces||[]):state.composerRelated.filter(name=>name!==shownWorkspace);const spaces=state.workspaces.length?state.workspaces:[{name:'产品团队'},{name:'运营团队'},{name:'公共空间'}];const others=spaces.filter(space=>space.name!==shownWorkspace);const pill=`<button class="context-pill" data-action="toggle-composer-space" aria-label="选择工作空间，当前为${safe(shownWorkspace)}${related.length?`，并关联 ${safe(related.join('、'))}`:''}"><span class="workspace-mark tiny">${safe(workspaceInitial(shownWorkspace))}</span>${safe(shownWorkspace)}${related.length?`<small class="space-related-count">+${related.length}</small>`:''}${icon('down')}</button>`;if(!state.composerSpaceMenu)return pill;const relatedRows=others.map(space=>`<button class="space-related-row ${related.includes(space.name)?'on':''}" data-action="${currentTask?'toggle-task-related-space':'toggle-composer-related'}" data-id="${safe(space.name)}" aria-pressed="${related.includes(space.name)?'true':'false'}"><span class="space-check">${related.includes(space.name)?icon('check'):''}</span><span class="workspace-mark tiny">${safe(workspaceInitial(space.name))}</span><span>${safe(space.name)}</span></button>`).join('');const menu=currentTask?`<strong>归属空间：${safe(shownWorkspace)}（不可更改）</strong><small class="space-menu-note">同时关联到（可多选）：关联后这项工作会出现在对应空间，Agent 也会用到这些空间的团队记忆和资料。</small>${relatedRows}`:`<strong>新工作归属哪个空间？</strong>${spaces.map(space=>`<button data-action="select-composer-space" data-id="${safe(space.name)}"><span class="workspace-mark tiny">${safe(workspaceInitial(space.name))}</span><span>${safe(space.name)}</span>${shownWorkspace===space.name?icon('check'):''}</button>`).join('')}${others.length?`<strong class="space-menu-sub">同时关联到（可多选）</strong><small class="space-menu-note">例如归属团队空间，同时关联项目空间；关联空间的团队记忆和资料也会提供给 Agent。</small>${relatedRows}`:''}`;return `${pill}<div class="composer-space-menu">${menu}</div>`})()}</div><div class="capability-anchor"><button class="capability-trigger agent-trigger ${state.capabilityPanel&&state.capabilitySection==='agent'?'active':''}" data-action="toggle-capabilities" data-id="agent" aria-label="选择执行 Agent" aria-expanded="${state.capabilityPanel&&state.capabilitySection==='agent'?'true':'false'}">${icon('spark')}<span>${agentLabel(selectedAgentMode())}</span>${icon('down')}</button>${state.capabilityPanel&&state.capabilitySection==='agent'?capabilityPicker():''}</div><div class="capability-anchor"><button class="capability-trigger tools-trigger ${state.capabilityPanel&&state.capabilitySection==='tools'?'active':''}" data-action="toggle-capabilities" data-id="tools" aria-label="查看工具与技能" aria-expanded="${state.capabilityPanel&&state.capabilitySection==='tools'?'true':'false'}">${icon('grid')}<span>工具与技能</span>${icon('down')}</button>${state.capabilityPanel&&state.capabilitySection==='tools'?capabilityPicker():''}</div></div><div><button class="send-button" data-action="submit" data-input="${id}" aria-label="交给 Agent" title="交给 Agent">${icon('arrow')}</button></div></div>
+  <div class="composer-bar"><div><button class="composer-tool" data-action="upload-from-composer" aria-label="上传文件到当前空间资料" title="上传到当前空间资料">${icon('paperclip')}</button><button class="composer-doc-button" data-action="toggle-document-picker" data-id="${id}" aria-label="引用空间资料" aria-expanded="${state.documentPicker===id?'true':'false'}">${icon('file')}引用资料</button><button class="mention-trigger" data-action="toggle-mentions" data-input="${id}" aria-label="@ 同事" aria-expanded="${state.mentionMenu&&state.mentionInput===id?'true':'false'}">@ 同事</button><div class="composer-space-anchor">${(()=>{const currentTask=taskWorkspace?tasks.find(task=>task.id===state.task):null;const related=currentTask?(currentTask.relatedWorkspaces||[]):state.composerRelated.filter(name=>name!==shownWorkspace);const spaces=state.workspaces.length?state.workspaces:[{name:'产品团队'},{name:'运营团队'},{name:'公共空间'}];const others=spaces.filter(space=>space.name!==shownWorkspace&&space.type!=='personal');const pill=`<button class="context-pill" data-action="toggle-composer-space" aria-label="选择工作空间，当前为${safe(shownWorkspace)}${related.length?`，并关联 ${safe(related.join('、'))}`:''}"><span class="workspace-mark tiny">${safe(workspaceInitial(shownWorkspace))}</span>${safe(shownWorkspace)}${related.length?`<small class="space-related-count">+${related.length}</small>`:''}${icon('down')}</button>`;if(!state.composerSpaceMenu)return pill;const relatedRows=others.map(space=>`<button class="space-related-row ${related.includes(space.name)?'on':''}" data-action="${currentTask?'toggle-task-related-space':'toggle-composer-related'}" data-id="${safe(space.name)}" aria-pressed="${related.includes(space.name)?'true':'false'}"><span class="space-check">${related.includes(space.name)?icon('check'):''}</span><span class="workspace-mark tiny">${safe(workspaceInitial(space.name))}</span><span>${safe(space.name)}</span></button>`).join('');const menu=currentTask?`<strong>归属空间：${safe(shownWorkspace)}（不可更改）</strong><small class="space-menu-note">同时关联到（可多选）：关联后这项工作会出现在对应空间，Agent 也会用到这些空间的团队记忆和资料。</small>${relatedRows}`:`<strong>新工作归属哪个空间？</strong>${spaces.map(space=>`<button data-action="select-composer-space" data-id="${safe(space.name)}"><span class="workspace-mark tiny">${safe(workspaceInitial(space.name))}</span><span>${safe(space.name)}</span>${shownWorkspace===space.name?icon('check'):''}</button>`).join('')}${others.length?`<strong class="space-menu-sub">同时关联到（可多选）</strong><small class="space-menu-note">例如归属团队空间，同时关联项目空间；关联空间的团队记忆和资料也会提供给 Agent。</small>${relatedRows}`:''}`;return `${pill}<div class="composer-space-menu">${menu}</div>`})()}</div><div class="capability-anchor"><button class="capability-trigger agent-trigger ${state.capabilityPanel&&state.capabilitySection==='agent'?'active':''}" data-action="toggle-capabilities" data-id="agent" aria-label="选择执行 Agent" aria-expanded="${state.capabilityPanel&&state.capabilitySection==='agent'?'true':'false'}">${icon('spark')}<span>${agentLabel(selectedAgentMode())}</span>${icon('down')}</button>${state.capabilityPanel&&state.capabilitySection==='agent'?capabilityPicker():''}</div><div class="capability-anchor"><button class="capability-trigger tools-trigger ${state.capabilityPanel&&state.capabilitySection==='tools'?'active':''}" data-action="toggle-capabilities" data-id="tools" aria-label="查看工具与技能" aria-expanded="${state.capabilityPanel&&state.capabilitySection==='tools'?'true':'false'}">${icon('grid')}<span>工具与技能</span>${icon('down')}</button>${state.capabilityPanel&&state.capabilitySection==='tools'?capabilityPicker():''}</div></div><div><button class="send-button" data-action="submit" data-input="${id}" aria-label="交给 Agent" title="交给 Agent">${icon('arrow')}</button></div></div>
 </div>`}
 
 const capabilityItems={
@@ -510,7 +548,7 @@ function conversation(){
       ${t.id==='feedback'?channelUpdate():''}
       ${showPlaceholder?`<div class="message agent"><span class="agent-avatar">${icon('spark')}</span><div><small>团队 Agent</small><p>${safe(agentText)}</p>${progressCard(t.id)}
       ${t.id==='feedback'?`<button class="result-card" data-action="toggle-artifact"><span class="result-thumb">${icon('app')}</span><span><strong>客户反馈管理 · v2</strong><small>${state.published?'已发布给产品团队':'已准备好，等待你的确认'}</small></span>${icon('chevron')}</button>${state.published?`<button class="open-live" data-action="open-app">打开应用 ${icon('external')}</button>`:`<div class="approval-row"><button class="soft-button" data-action="revise">继续修改</button><button class="dark-button" data-action="publish">${icon('check')}确认发布</button></div>`}`:''}
-      </div></div>`:''}${liveMessages.map(m=>m.role==='assistant'?`<div class="message agent"><span class="agent-avatar">${icon('spark')}</span><div><small>${m.source==='codebuddy'?'CodeBuddy':m.source==='codex'?'Codex':m.source==='kimi'?'Kimi Code':m.source==='cloudagent'?'CodeBuddy 云端':['workbuddy','workbuddy-pending'].includes(m.source)?(m.via==='cloud-task'?'WorkBuddy 云端':'WorkBuddy'):m.source==='external-agent'?'外部 Agent':'团队 Agent'} · ${m.source==='connection-error'?'调用失败':m.source==='workbuddy-pending'?'已发送，等待回复':'实际响应'}</small><p>${safe(m.text)}</p>${m.artifacts?.length?`<div class="message-documents">成果已存入空间资料：${safe(m.artifacts.map(item=>item.name).join('、'))}</div>`:''}${m.source==='workbuddy-pending'?`<button class="soft-button" data-action="sync-workbuddy" data-id="${safe(m.id)}">获取最新回复</button>`:''}${replyProgress(t,m)}${wecomMessageAction(m,t.id)}</div></div>`:`<div class="message user"><span class="message-avatar">明</span><div><small>${safe(messageAuthor(m))} · 刚刚</small><p>${safe(m.text)}</p>${m.documentRefs?.length?`<div class="message-documents">引用资料：${safe(m.documentRefs.map(ref=>ref.name).join("、"))}</div>`:''}${m.mentions?.length?`<div class="mention-delivery">${icon('bell')} @${safe(m.mentions.map(item=>item.name).join('、'))} · ${m.mentionDelivery==='demo'?'演示提醒，未真实送达':m.mentionDelivery==='sent'?'企微接口已接受，请在企微确认':m.mentionDeliveries?.length?m.mentionDeliveries.map(item=>item.status==='sent'?`${item.name} 已发到${channelLabel[item.channel]||'企微'}`:item.name+' '+(item.detail||'未送达')).join('；'):'等待发送'}</div>`:''}${wecomMessageAction(m,t.id)}</div></div>`).join('')}${desktopApi&&runMessage&&run!=='not-configured'?`<div class="agent-run-status"><span>${icon(['running','queued','awaiting-workbuddy'].includes(run)?'spark':'history')}${safe(runMessage)}</span>${['failed','interrupted'].includes(run)?`<button data-action="retry-agent">重试</button>`:''}</div>`:''}</div>
+      </div></div>`:''}${liveMessages.map(m=>m.role==='assistant'?`<div class="message agent"><span class="agent-avatar">${icon('spark')}</span><div><small>${m.source==='codebuddy'?'CodeBuddy':m.source==='codex'?'Codex':m.source==='kimi'?'Kimi Code':m.source==='cloudagent'?'CodeBuddy 云端':['workbuddy','workbuddy-pending'].includes(m.source)?(m.via==='cloud-task'?'WorkBuddy 云端':'WorkBuddy'):m.source==='external-agent'?'外部 Agent':'团队 Agent'} · ${m.source==='connection-error'?'调用失败':m.source==='workbuddy-pending'?'已发送，等待回复':'实际响应'}</small><p>${safe(m.text)}</p>${m.artifacts?.length?`<div class="message-documents">${isPersonalName(t.workspace)?'成果已存入个人空间':`成果已存入${safe(t.workspace)}资料${m.personalArtifacts?.length?'，个人空间留有一份':''}`}：${safe(m.artifacts.map(item=>item.name).join('、'))}</div>`:m.personalArtifacts?.length?`<div class="message-documents">成果已留存到个人空间：${safe(m.personalArtifacts.map(item=>item.name).join('、'))}</div>`:''}${m.source==='workbuddy-pending'?`<button class="soft-button" data-action="sync-workbuddy" data-id="${safe(m.id)}">获取最新回复</button>`:''}${replyProgress(t,m)}${wecomMessageAction(m,t.id)}</div></div>`:`<div class="message user"><span class="message-avatar">明</span><div><small>${safe(messageAuthor(m))} · 刚刚</small><p>${safe(m.text)}</p>${m.documentRefs?.length?`<div class="message-documents">引用资料：${safe(m.documentRefs.map(ref=>ref.name).join("、"))}</div>`:''}${m.mentions?.length?`<div class="mention-delivery">${icon('bell')} @${safe(m.mentions.map(item=>item.name).join('、'))} · ${m.mentionDelivery==='demo'?'演示提醒，未真实送达':m.mentionDelivery==='sent'?'企微接口已接受，请在企微确认':m.mentionDeliveries?.length?m.mentionDeliveries.map(item=>item.status==='sent'?`${item.name} 已发到${channelLabel[item.channel]||'企微'}`:item.name+' '+(item.detail||'未送达')).join('；'):'等待发送'}</div>`:''}${wecomMessageAction(m,t.id)}</div></div>`).join('')}${desktopApi&&runMessage&&run!=='not-configured'?`<div class="agent-run-status"><span>${icon(['running','queued','awaiting-workbuddy'].includes(run)?'spark':'history')}${safe(runMessage)}</span>${['failed','interrupted'].includes(run)?`<button data-action="retry-agent">重试</button>`:''}</div>`:''}</div>
     <div class="thread-composer">${desktopApi&&run==='not-configured'?`<div class="agent-setup-banner"><span>${icon('spark')}${safe(setupMessage)}</span><div>${ready?`<button data-action="retry-agent">回复上一条</button>`:mode==='built-in'?`<button data-action="open-model-settings">配置模型</button>`:''}<button data-action="toggle-capabilities" data-id="agent">选择 Agent</button></div></div>`:''}${composer('thread-input',true)}<span class="composer-note">Enter 交给 Agent · @ 同事会同时通知到他的企微</span></div>
   </section>`;
 }
@@ -536,7 +574,7 @@ function taskStage(){return `<main class="stage task-stage">${conversation()}${a
 function appsStage(){return `<main class="stage apps-stage"><header class="apps-stage-head"><div><span class="app-icon purple">${icon('app')}</span><span><strong>客户反馈管理</strong><small>产品团队 · ${state.published?'v2':'v1'} · 演示应用</small></span></div><button class="soft-button" data-action="revise">${icon('spark')}让 Agent 改进</button></header>${mockApplication(true)}</main>`}
 
 function activeWorkspaceId(name){
-  return state.workspaces.find(space=>space.name===name)?.id||({产品团队:'product',运营团队:'operations',公共空间:'public'}[name]);
+  return state.workspaces.find(space=>space.name===name)?.id||({个人空间:'personal',产品团队:'product',运营团队:'operations',公共空间:'public'}[name]);
 }
 
 function memoryOverlay(){
@@ -813,6 +851,7 @@ async function uploadDocuments(workspaceName=state.workspace){
     const uploaded=await desktopApi.uploadDocuments(activeWorkspaceId(workspaceName));
     if(!uploaded.length)return;
     state.recentAttachment={name:uploaded.length===1?uploaded[0].name:`${uploaded.length} 份文件`,workspace:workspaceName};
+    if(isPersonalName(workspaceName))state.personalTab='uploaded';
     await refreshDocuments();render();toast(`已上传到${workspaceName}资料`);
   }catch(error){toast(error?.message||'上传资料失败')}
 }
@@ -1196,6 +1235,8 @@ root.addEventListener('click',async(event)=>{
   if(action==='toggle-source-message'){state.sourceExpanded=!state.sourceExpanded;render()}
   if(action==='upload-documents')await uploadDocuments();
   if(action==='doc-category'){state.docCategory=id;render()}
+  if(action==='personal-tab'){state.personalTab=id;state.personalShowAll=false;render()}
+  if(action==='toggle-personal-all'){state.personalShowAll=!state.personalShowAll;render()}
   if(action==='doc-archived'){state.docShowArchived=!state.docShowArchived;render()}
   if(action==='open-document'){
     try{if(desktopApi)await desktopApi.openDocument(id);else{const item=state.documents.find(document=>document.id===id);if(item?.blobUrl)window.open(item.blobUrl,'_blank','noopener,noreferrer')}}
@@ -1356,6 +1397,11 @@ root.addEventListener('input',event=>{
     state.searchQuery=event.target.value;render();
     const search=document.getElementById('global-search-input');search?.focus();try{search?.setSelectionRange(position,position)}catch{}
   }
+  if(event.target.id==='personal-search'){
+    const position=event.target.selectionStart;
+    state.personalSearch=event.target.value;render();
+    const search=document.getElementById('personal-search');search?.focus();try{search?.setSelectionRange(position,position)}catch{}
+  }
   if(event.target.id==='doc-search'){
     const position=event.target.selectionStart;
     state.docSearch=event.target.value;
@@ -1459,7 +1505,13 @@ async function bootstrapDesktop(){
     state.settings=await desktopApi.getSettings();
     await refreshMemories();
     await refreshDocuments();
-    desktopApi.onDataChanged(data=>{applyDesktopData(data);render()});
+    desktopApi.onDataChanged(async data=>{
+      applyDesktopData(data);
+      const known=new Set(state.documents.map(document=>document.id));
+      const fresh=(data?.tasks||[]).some(task=>(task.messages||[]).some(message=>[...(message.artifacts||[]),...(message.personalArtifacts||[])].some(item=>!known.has(item.id))));
+      if(fresh){try{await refreshDocuments()}catch{}}
+      render();
+    });
     desktopApi.onOpenTask(id=>openTask(id));
     render();
     if(payload.taskLink)openTask(payload.taskLink);

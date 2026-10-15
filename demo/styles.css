@@ -99,3 +99,16 @@
 .reply-progress.done{display:flex;align-items:center;gap:6px;background:#f6fbf7;border-color:#cfe8d6;font-size:11px;color:#3f5f47}.reply-progress.done span{flex:1;min-width:0;line-height:1.7}.reply-progress.done .progress-tag{margin:0 3px 0 6px}.reply-progress.done .icon{width:12px;height:12px;color:#15803d}.reply-progress.done button{border:0;background:none;color:#64748b;font-size:11px;cursor:pointer;opacity:0}.reply-progress.done:hover button{opacity:1}
 .progress-add-box{display:flex;align-items:center;gap:8px;margin:8px 16px 0;border:1px solid #e6ebdf;border-radius:10px;background:#fbfcf9;padding:8px 10px}.progress-add-box strong{font-size:12px}.progress-add-box input{flex:1;min-width:0;font-size:12px;padding:4px 8px;border:1px solid #e6ebdf;border-radius:7px}.progress-add-box button{font-size:11px;padding:5px 10px;border-radius:7px;border:1px solid #dfe3e8;background:#fff;cursor:pointer}.progress-add-box .dark-button{border-color:transparent}
 .history-group-more[aria-expanded="true"] .icon{transform:rotate(180deg)}
+
+/* 个人空间：只有自己可见，和 Agent 工作产生的材料跨空间留存 */
+.space-avatar.personal-avatar,.history-group-avatar.personal{background:#252a35;color:var(--lime)}
+.space-stage-mark.personal-mark{background:#252a35;color:var(--lime)}
+.personal-count{color:#a0a7b1;font-weight:500;margin-left:2px}
+.personal-talk{border:0;border-bottom:1px solid #eef0f2;background:#fff;width:100%;display:flex;align-items:flex-start;gap:11px;padding:13px 17px;text-align:left;color:#454c57}
+.personal-talk:hover{background:#f8f9fa}
+.personal-talk>span:nth-child(2){min-width:0;flex:1}
+.personal-talk strong{display:block;font-size:12px;color:#363c46}
+.personal-talk small{display:block;font-size:10px;color:#9299a4;margin-top:4px}
+.personal-talk em{display:block;font-style:normal;font-size:11px;color:#6f7782;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.personal-talk>.icon{width:12px;height:12px;color:#a4aab2;margin-top:4px}
+.composer-document-picker .doc-scope-note{margin-left:auto;font-size:9px;color:#9aa1ab}

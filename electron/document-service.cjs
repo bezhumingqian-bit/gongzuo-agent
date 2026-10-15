@@ -19,6 +19,11 @@ function normalizeMetadata(input = {}) {
   return { category, tags: [...new Set(tags.map(tag => tag.trim()))] };
 }
 
+function normalizeOrigin(origin) {
+  const text = (value, max) => (value == null ? null : String(value).slice(0, max));
+  return { kind: 'agent', taskId: text(origin.taskId, 100), taskTitle: text(origin.taskTitle, 120), workspace: text(origin.workspace, 80), agent: text(origin.agent, 40), messageId: text(origin.messageId, 100) };
+}
+
 function publicDocument(document) {
   const { storedName, ...visible } = document;
   return visible;
@@ -37,7 +42,9 @@ class DocumentService {
     return data.items.map(publicDocument);
   }
 
-  async upload(workspaceId, filePaths) {
+  // origin (optional) records where an Agent-produced file came from, so the
+  // personal space can show "来自 产品团队 ·「某项工作」".
+  async upload(workspaceId, filePaths, { origin = null } = {}) {
     if (!Array.isArray(filePaths) || !filePaths.length || filePaths.length > 10) throw new Error('一次最多上传 10 份资料');
     const newItems = [];
     const copied = [];
@@ -55,7 +62,7 @@ class DocumentService {
         await fs.copyFile(sourcePath, destination);
         copied.push(destination);
         await fs.chmod(destination, 0o600);
-        newItems.push({ id, workspaceId, name, storedName, size: stat.size, category: '其他', tags: [], status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+        newItems.push({ id, workspaceId, name, storedName, size: stat.size, category: '其他', tags: [], status: 'active', ...(origin ? { origin: normalizeOrigin(origin) } : {}), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
       }
       await this.index.update(data => { data.items.unshift(...newItems); return data; });
       return newItems.map(publicDocument);
