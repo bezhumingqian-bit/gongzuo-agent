@@ -180,7 +180,9 @@ async function executeTool(name, args = {}, bridgeCall = callBridge) {
     const work = await bridgeCall('GET', `/v1/works/${encodeURIComponent(args.taskId)}`);
     return [`「${work.title}」 · ${work.workspace} · ${runLabel(work.agentRun)}`, `taskId: ${work.taskId}`, `目标：${work.goal}`,
       work.steps.length ? `步骤：\n${work.steps.map(step => `- [${step.status}] ${step.title}`).join('\n')}` : '',
-      '对话：', ...work.messages.map(item => `【${item.role === 'assistant' ? item.source || '助手' : '用户'} · ${time(item.createdAt)}】\n${item.text}`)].filter(Boolean).join('\n');
+      work.note ? `注意：${work.note}` : '',
+      work.confirmedProgress?.length ? `已确认进展：\n${work.confirmedProgress.map(text => `- ${text}`).join('\n')}` : '',
+      work.conversationScope === 'colleague' ? '同事本人的消息：' : '对话：', ...work.messages.map(item => `【${item.role === 'assistant' ? item.source || '助手' : '用户'} · ${time(item.createdAt)}】\n${item.text}`)].filter(Boolean).join('\n');
   }
   if (name === 'gongzuo_create_work') {
     const work = await bridgeCall('POST', '/v1/works', { goal: args.goal, ...(args.workspace ? { workspace: args.workspace } : {}) });

@@ -194,11 +194,25 @@ class WorkBuddyBridge {
         const task = data.tasks.find(item => item.id === requireId(id, '工作 ID'));
         if (!task) throw new BridgeError(404, '工作不存在');
         this.ops.check(this.actor, 'work.view', data.workspaces.find(space => space.name === task.workspace));
+        // While the pending message comes from a colleague (and the owner has not
+        // shared the conversation), WorkBuddy's reply goes back to that colleague:
+        // show only what the colleague may see, same boundary as the claim payload.
+        const trigger = task.agentRun?.status === 'awaiting-workbuddy' ? (task.messages || []).find(item => item.id === task.agentRun.triggerId) : null;
+        const colleague = trigger?.wecomOrigin && !task.conversationShared ? trigger.wecomOrigin.userId : null;
+        const own = colleague ? new Set((task.messages || []).filter(item => item.role === 'user' && item.wecomOrigin?.userId === colleague).map(item => item.id)) : null;
+        const visible = (task.messages || []).filter(item => ['user', 'assistant'].includes(item.role))
+          .filter(item => !own || (item.role === 'user' ? own.has(item.id) : own.has(item.replyToId)));
         return {
           ...summarizeTask(task),
           goal: task.goal,
           steps: (task.steps || []).map(step => ({ title: step.title, status: step.status })),
-          messages: (task.messages || []).filter(item => ['user', 'assistant'].includes(item.role)).slice(-30).map(item => ({
+          ...(own ? {
+            conversationScope: 'colleague',
+            note: '待处理消息来自同事，回复会发给这位同事；负责人的过程对话未共享，这里只列出同事本人的消息和已确认进展。',
+            confirmedProgress: (task.progress || []).filter(item => item.status === 'published').slice(-12).map(item => String(item.text || '').slice(0, 200))
+          } : {}),
+          messageCount: visible.length,
+          messages: visible.slice(-30).map(item => ({
             id: item.id, role: item.role, source: item.source || null, createdAt: item.createdAt, text: String(item.text || '').slice(0, 4000)
           }))
         };

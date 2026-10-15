@@ -165,3 +165,28 @@ test('回复可附带本机文件：校验格式与存在性，存入该工作�
     await fs.access(file);
   } finally { await ctx.cleanup(); }
 });
+
+test('查看工作：待处理消息来自同事时只返回同事自己的消息和已确认进展；负责人共享后返回完整对话', async () => {
+  const ctx = await setup();
+  try {
+    const created = await ctx.runner.create('福州迁移清单', '产品团队');
+    await ctx.runner.queues.get(created.id);
+    const first = (await ctx.store.read()).tasks[0];
+    await ctx.runner.submitHandoffReply(created.id, first.agentRun.triggerId, '负责人私下：3 台可能有问题');
+    await ctx.store.update(draft => { draft.tasks[0].progress = [{ id: 'p', text: '42/60 台已核对', status: 'published' }, { id: 'd', text: '草稿', status: 'draft' }]; return draft; });
+    await ctx.runner.append(created.id, '进度怎么样', [], [], { userId: 'bob' });
+    await ctx.runner.queues.get(created.id);
+    let view = await ctx.call('GET', `/v1/works/${created.id}`);
+    assert.equal(view.conversationScope, 'colleague');
+    assert.deepEqual(view.confirmedProgress, ['42/60 台已核对']);
+    assert.deepEqual(view.messages.map(item => item.text), ['进度怎么样']);
+    assert.doesNotMatch(JSON.stringify(view), /私下|草稿/);
+    const shown = await ctx.tool('gongzuo_get_work', { taskId: created.id });
+    assert.match(shown, /负责人的过程对话未共享[\s\S]*42\/60 台已核对[\s\S]*同事本人的消息/);
+    assert.doesNotMatch(shown, /私下/);
+    await ctx.store.update(draft => { draft.tasks[0].conversationShared = true; return draft; });
+    view = await ctx.call('GET', `/v1/works/${created.id}`);
+    assert.equal(view.conversationScope, undefined);
+    assert.match(JSON.stringify(view.messages), /私下/);
+  } finally { await ctx.cleanup(); }
+});
