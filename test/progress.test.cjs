@@ -59,7 +59,7 @@ test('Agent 回复：正文不含进展块，进展存为草稿；确认、修�
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('界面：工作页显示进展面板（草稿待确认 / 已发布）；空间页显示概况、工作卡片墙和只含已确认进展的动态', () => {
+test('界面：进展附在 Agent 回复下就地确认，顶部不再有面板；空间页显示概况、工作卡片墙和只含已确认进展的动态', () => {
   const vm = require('node:vm');
   let html = '';
   const root = { set innerHTML(value) { html = value; }, querySelector: () => null, querySelectorAll: () => [], addEventListener() {} };
