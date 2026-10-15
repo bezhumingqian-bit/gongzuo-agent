@@ -27,6 +27,7 @@ const memberAccess = (space, userId) => workspaceRole(space, actors.wecom(userId
 function denialText(error, commandType) {
   if (error.code === 'workspace-not-found') return '工作空间不存在，请使用共作中的准确空间名称。';
   if (error.code === 'task-not-found') return '找不到唯一的工作 ID，请使用完整 ID。';
+  if (error.code === 'no-work') return error.message;
   if (commandType === 'create') return '你尚未获得这个空间的企微协作权限。';
   if (error.code === 'read-only') return '你在这个项目只有只读权限。';
   return '你尚未获得这个空间的企微参与权限。';

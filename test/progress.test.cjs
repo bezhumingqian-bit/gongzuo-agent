@@ -82,7 +82,9 @@ tasks=[{id:'w1',title:'福州边缘一区下线',goal:'下线福州一区',works
 state.view='task';state.task='w1';render()`, context);
   assert.doesNotMatch(html, /class="progress-panel/, '顶部不再有进展面板');
   assert.match(html, /已同步 1 条进展到空间[\s\S]*第 2 批迁移清单 18 台/, '已确认的那轮收起为一行');
-  assert.match(html, /这一段完成了[\s\S]*缺 3 台机位信息[\s\S]*确认同步 1 条[\s\S]*不同步/, '进展附在完成这一段的回复下面');
+  assert.match(html, /这一段完成了[\s\S]*缺 3 台机位信息[\s\S]*确认同步 0 条[\s\S]*不同步/, '进展附在完成这一段的回复下面，默认不勾选');
+  vm.runInContext("state.progressChecked=Object.fromEntries(tasks[0].progress.filter(item=>item.status==='draft').map(item=>[item.id,true]));render()", context);
+  assert.match(html, /确认同步 1 条/, '逐条勾选后才计入');
   assert.doesNotMatch(html, /被忽略的不显示/);
   vm.runInContext("state.view='workspace';state.workspace='产品团队';state.task=null;render()", context);
   assert.match(html, /空间概况[\s\S]*2 项工作/);

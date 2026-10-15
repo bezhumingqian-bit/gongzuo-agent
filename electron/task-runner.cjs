@@ -13,6 +13,24 @@ const { transportOf } = require('./workbuddy-transport.cjs');
 const usesWorkBuddyOpenApi = config => config?.agent?.mode === 'workbuddy' && transportOf(config) === 'localassistant';
 const usesWorkBuddyHandoff = config => config?.agent?.mode === 'workbuddy' && transportOf(config) === 'handoff';
 
+// ---- privacy boundaries (see docs/ARCHITECTURE.md「空间与隐私」) ----
+const INHERITED_LIMITS = { team: 4, public: 3 };
+const spaceNamed = (data, name) => (data.workspaces || []).find(item => item.name === name) || null;
+const spacesOfType = (data, type) => (data.workspaces || []).filter(item => item.type === type);
+// Agents whose execution and files live in a cloud sandbox, not on this Mac.
+const runsInCloud = config => config?.agent?.mode === 'cloudagent' || (config?.agent?.mode === 'workbuddy' && transportOf(config) === 'cloud');
+
+// What a colleague's follow-up (from WeCom) may let the Agent see: the work's
+// goal, confirmed progress, and that colleague's own messages with the replies
+// to them — never the owner's process conversation, unless the owner shared it.
+function colleagueView(task, ordered, origin) {
+  const own = new Set(ordered.filter(item => item.role === 'user' && item.wecomOrigin?.userId === origin.userId).map(item => item.id));
+  const kept = ordered.filter(item => (item.role === 'user' && own.has(item.id)) || (item.role === 'assistant' && own.has(item.replyToId)));
+  const confirmed = (task.progress || []).filter(item => item.status === 'published').slice(-12).map(item => `- ${String(item.text || '').slice(0, 200)}`);
+  const background = { id: 'colleague-context', role: 'user', text: `【工作背景，由共作提供】目标：${String(task.goal || task.title || '').slice(0, 500)}${confirmed.length ? `\n已确认进展：\n${confirmed.join('\n')}` : '\n暂无已确认进展。'}\n以下是同事本人在这项工作里的消息；负责人的过程对话未共享。`, createdAt: task.createdAt };
+  return [background, ...kept];
+}
+
 function messagesThroughTrigger(messages, triggerId) {
   const triggerIndex = messages.findIndex(item => item.id === triggerId && item.role === 'user');
   if (triggerIndex < 0) return null;
@@ -45,14 +63,16 @@ class TaskRunner {
     if (!unique.length) return [];
     const data = await this.store.read();
     const spaceIds = new Set([workspace, ...related].map(name => data.workspaces.find(item => item.name === name)?.id).filter(Boolean));
-    // My own materials can be referenced in any work I write in this app.
-    if (!options.fromChannel) for (const space of data.workspaces) if (space.type === 'personal') spaceIds.add(space.id);
+    // Public materials can be referenced from any work; my own materials only in work I write here.
+    for (const space of spacesOfType(data, 'public')) spaceIds.add(space.id);
+    const personalIds = new Set(spacesOfType(data, 'personal').map(space => space.id));
+    if (!options.fromChannel) for (const id of personalIds) spaceIds.add(id);
     const documents = await this.documentService.list();
     return unique.map(id => {
       const item = documents.find(document => document.id === id && spaceIds.has(document.workspaceId) && document.status === 'active');
       if (!item) throw new Error(related.length ? '只能引用这项工作所在空间（含关联空间）或个人空间内的有效资料' : '只能引用当前空间或个人空间内的有效资料');
       if (!/\.(txt|md|csv|pdf|docx|doc)$/i.test(item.name)) throw new Error(`暂不能读取 ${item.name} 的正文`);
-      return { id: item.id, name: item.name };
+      return { id: item.id, name: item.name, ...(personalIds.has(item.workspaceId) ? { personal: true } : {}) };
     });
   }
 
@@ -206,8 +226,8 @@ class TaskRunner {
     const data = await this.store.read();
     const task = data.tasks.find(item => item.id === taskId);
     if (!task) return null;
-    const messages = messagesThroughTrigger(task.messages, triggerId);
-    if (!messages) return null;
+    const ordered = messagesThroughTrigger(task.messages, triggerId);
+    if (!ordered) return null;
     const config = { ...runtime, agent: { ...runtime.agent, mode: task.agentMode || runtime.agent.mode } };
     const workspaceId = data.workspaces.find(item => item.name === task.workspace)?.id;
     const related = (task.relatedWorkspaces || []).map(name => data.workspaces.find(item => item.name === name)).filter(Boolean);
@@ -215,9 +235,27 @@ class TaskRunner {
     const [personal, team] = await Promise.all([this.personalMemoryStore.read(), this.teamMemoryStore.read()]);
     const triggerMessage = task.messages.find(item => item.id === triggerId);
     const personalAllowed = mayUsePersonalMemory(triggerMessage?.wecomOrigin);
+    const primary = spaceNamed(data, task.workspace);
+    const inPersonal = primary?.type === 'personal';
+    // A colleague's follow-up sees only what the team may see.
+    const isolated = Boolean(triggerMessage?.wecomOrigin) && !task.conversationShared;
+    const messages = isolated ? colleagueView(task, ordered, triggerMessage.wecomOrigin) : ordered;
     // The local inbox is the local user's; colleagues writing in via WeCom cannot read it.
     const readWecomInbox = personalAllowed && asksToReadWecomInbox(triggerMessage?.text, messages.slice(0, -1), task.title);
-    const memory = getApplicableMemories(personalAllowed ? personal.items : [], team.items, spaceIds);
+    // Personal memory: all of it in personal work; in team/project work only the
+    // items the owner marked as portable (「可随我带入团队」).
+    const personalItems = personalAllowed ? personal.items.filter(item => inPersonal || item.portable === true) : [];
+    const memory = getApplicableMemories(personalItems, team.items, spaceIds);
+    // Rules flow down, read-only: a project gets its main team's memory, and every
+    // work gets the public space's. Capped per layer to keep the context small.
+    const inherited = [];
+    const parent = primary?.type === 'project' && primary.parentWorkspaceId ? data.workspaces.find(item => item.id === primary.parentWorkspaceId && item.type === 'team') : null;
+    if (parent && !spaceIds.includes(parent.id)) inherited.push([parent, INHERITED_LIMITS.team]);
+    for (const space of spacesOfType(data, 'public')) if (!spaceIds.includes(space.id)) inherited.push([space, INHERITED_LIMITS.public]);
+    for (const [space, limit] of inherited) {
+      const items = getApplicableMemories([], team.items, [space.id]).team.slice(0, limit).map(item => ({ ...item, inheritedFrom: space.name }));
+      memory.team.push(...items);
+    }
     if (related.length) memory.relatedWorkspaces = related.map(space => space.name);
     if (/企微|企业微信|机器人|长连接/u.test(`${task.title} ${triggerMessage?.text || ''}`) || readWecomInbox) {
       const recentWecomEvent = (data.wecomEvents || []).at(-1);
@@ -235,14 +273,15 @@ class TaskRunner {
     const refs = triggerMessage?.documentRefs || [];
     let attached;
     // Personal-space materials follow only messages written by the local user.
-    const docSpaceIds = personalAllowed ? [...spaceIds, ...data.workspaces.filter(space => space.type === 'personal').map(space => space.id)] : spaceIds;
+    const publicIds = spacesOfType(data, 'public').map(space => space.id);
+    const docSpaceIds = [...spaceIds, ...publicIds, ...(personalAllowed ? spacesOfType(data, 'personal').map(space => space.id) : [])];
     try { attached = await Promise.all(refs.map(ref => this.documentService.readForAgent(ref.id, docSpaceIds))); }
     catch (error) {
       const failure = new Error(String(error?.message || '资料读取失败，请检查资料后重试').slice(0, 180));
       failure.documentFailure = true;
       throw failure;
     }
-    const snapshot = { ...task, messages: messages.map(item => {
+    const snapshot = { ...task, ...(isolated ? { agentSessionId: null, agentSessionOwner: null, progress: [] } : {}), messages: messages.map(item => {
       if (item.id !== triggerId) return item;
       const parts = [item.text, ...attached.map(document => `【引用资料：${document.name}${document.truncated ? '，仅前 12000 字' : ''}】\n${document.text}`)];
       if (readWecomInbox) {
@@ -254,7 +293,7 @@ class TaskRunner {
       }
       return { ...item, text: parts.join('\n\n') };
     }) };
-    return { task, snapshot, memory, config };
+    return { task, snapshot, memory, config, isolated };
   }
 
   async run(taskId, triggerId) {
@@ -264,12 +303,21 @@ class TaskRunner {
       if (!before || !messagesThroughTrigger(before.messages, triggerId)) return;
       const selected = { ...runtime, agent: { ...runtime.agent, mode: before.agentMode || runtime.agent.mode } };
       if (!this.agent.isConfigured(selected)) { await this.setRunStatus(taskId, { status: 'not-configured', triggerId }); return; }
+      const space = spaceNamed(await this.store.read(), before.workspace);
+      if (space?.type === 'personal' && runtime.privacy?.personalLocalOnly && runsInCloud(selected)) {
+        await this.setRunStatus(taskId, { status: 'failed', triggerId, message: '个人空间已设为「只用本机执行」，当前 Agent 会在云端沙箱执行。请换用本机 Agent，或在个人空间关闭这项设置。' });
+        return;
+      }
       if (usesWorkBuddyHandoff(selected)) {
         // WorkBuddy pulls this work through the local MCP bridge; nothing runs in-process.
         await this.setRunStatus(taskId, { status: 'awaiting-workbuddy', triggerId });
         return;
       }
-      await this.setRunStatus(taskId, { status: 'running', triggerId });
+      // What the work page shows while the Agent runs: since when, the last
+      // sign of life from the Agent, how many steps, and whether 共作 is
+      // reconnecting or waiting for an earlier request to finish.
+      const live = { status: 'running', triggerId, startedAt: new Date().toISOString(), steps: 0, phase: 'working' };
+      await this.setRunStatus(taskId, live);
       let prepared;
       try { prepared = await this.prepare(taskId, triggerId); }
       catch (error) {
@@ -278,15 +326,29 @@ class TaskRunner {
         return;
       }
       if (!prepared) return;
-      let lastProgressAt = 0;
-      const onProgress = ({ text, step } = {}) => {
-        const now = Date.now();
-        if (now - lastProgressAt < 1500) return;
-        lastProgressAt = now;
-        const visible = String(text || '').replace(/<(进展|progress)>[\s\S]*$/u, '').trim();
-        this.setRunStatus(taskId, { status: 'running', triggerId, progress: String(step ? `正在：${step}` : visible.slice(-200)).slice(0, 240) }).catch(() => {});
+      let flushTimer = null;
+      let lastFlush = 0;
+      let finished = false;
+      const flush = () => {
+        flushTimer = null;
+        if (finished) return;
+        lastFlush = Date.now();
+        this.updateLiveRun(taskId, triggerId, { ...live }).catch(() => {});
       };
-      const answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory, { onProgress });
+      const onProgress = ({ text, step, steps, lastActivityAt, phase, attempt } = {}) => {
+        const visible = String(text || '').replace(/<(进展|progress)>[\s\S]*$/u, '').trim();
+        const said = step ? `正在${step}` : visible ? visible.slice(-200) : '';
+        if (said) live.progress = said.slice(0, 240);
+        live.lastActivityAt = new Date(lastActivityAt || Date.now()).toISOString();
+        if (Number.isFinite(steps)) live.steps = steps;
+        live.phase = phase || 'working';
+        if (attempt) live.attempt = attempt; else delete live.attempt;
+        if (!flushTimer) flushTimer = setTimeout(flush, Math.max(0, 1500 - (Date.now() - lastFlush)));
+      };
+      let answer;
+      try { answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory, { onProgress }); }
+      finally { finished = true; clearTimeout(flushTimer); }
+      if (answer && prepared.isolated) answer.isolatedSession = true;
       if (answer?.pendingFiles) await this.attachAnswerFiles(prepared.task, answer);
       await this.recordAnswer(taskId, triggerId, answer);
     } catch (error) {
@@ -294,41 +356,125 @@ class TaskRunner {
     }
   }
 
-  // Files produced by an Agent are always kept in the personal space (the
-  // process belongs to the person) and, when the work lives in a team or
-  // project space, also stored there (the result belongs to the team).
+  // Progress writes never overwrite a run that has already ended or moved on.
+  async updateLiveRun(taskId, triggerId, run) {
+    const data = await this.store.update(draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (task?.agentRun?.status === 'running' && task.agentRun.triggerId === triggerId) {
+        task.agentRun = { ...run, updatedAt: new Date().toISOString() };
+        task.updatedAt = task.agentRun.updatedAt;
+      }
+      return draft;
+    });
+    this.publish(data);
+  }
+
+  // Files produced by an Agent are stored once, in the space the work lives in
+  // (the result belongs there). The personal space links to them instead of
+  // keeping copies, so team permissions keep applying.
   async attachAnswerFiles(task, answer) {
     const files = answer.pendingFiles || [];
     const directory = answer.pendingFilesDirectory;
     delete answer.pendingFiles;
     delete answer.pendingFilesDirectory;
-    const problems = [];
     try {
-      if (!files.length || typeof this.documentService?.upload !== 'function') return;
       const data = await this.store.read();
-      const space = data.workspaces.find(item => item.name === task.workspace);
-      const personal = data.workspaces.find(item => item.type === 'personal');
-      const paths = files.slice(0, 10).map(file => file.path);
+      const space = spaceNamed(data, task.workspace);
+      if (!space || !files.length || typeof this.documentService?.upload !== 'function') return;
       const origin = { taskId: task.id, taskTitle: task.title || task.goal, workspace: task.workspace, agent: answer.source, messageId: answer.id };
-      if (space && space.type !== 'personal') {
-        try {
-          const saved = await this.documentService.upload(space.id, paths);
-          answer.artifacts = saved.map(item => ({ id: item.id, name: item.name }));
-        } catch (error) { problems.push(`未能存入${space.name}资料：${String(error?.message || '未知错误').slice(0, 120)}`); }
-      }
-      if (personal) {
-        try {
-          const kept = await this.documentService.upload(personal.id, paths, { origin });
-          answer.personalArtifacts = kept.map(item => ({ id: item.id, name: item.name }));
-          if (space?.type === 'personal') answer.artifacts = answer.personalArtifacts;
-        } catch (error) { problems.push(`未能留存到个人空间：${String(error?.message || '未知错误').slice(0, 120)}`); }
-      }
+      const saved = await this.documentService.upload(space.id, files.slice(0, 10).map(file => file.path), { origin });
+      answer.artifacts = saved.map(item => ({ id: item.id, name: item.name }));
     } catch (error) {
-      problems.push(`未能保存：${String(error?.message || '未知错误').slice(0, 120)}`);
+      answer.text = `${answer.text}\n\n（生成的文件未能存入${task.workspace}资料：${String(error?.message || '未知错误').slice(0, 120)}）`;
     } finally {
-      if (problems.length) answer.text = `${answer.text}\n\n（生成的文件${problems.join('；')}）`;
       if (directory) await require('node:fs/promises').rm(directory, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  // Whether an answer in a team/project work drew on the owner's personal
+  // memory or materials; its progress drafts are then flagged for review.
+  async personalContextOf(taskId, triggerId) {
+    const data = await this.store.read();
+    const task = data.tasks.find(item => item.id === taskId);
+    if (!task || spaceNamed(data, task.workspace)?.type === 'personal') return null;
+    const trigger = task.messages.find(item => item.id === triggerId);
+    if (trigger?.wecomOrigin) return null;
+    const documents = (trigger?.documentRefs || []).some(ref => ref.personal);
+    const memories = (await this.personalMemoryStore.read()).items.some(item => item.status === 'active' && item.scope === 'personal' && item.portable === true);
+    return documents && memories ? 'memory-and-document' : documents ? 'document' : memories ? 'memory' : null;
+  }
+
+  // ---- 移交：a personal work hands its result to a team or project ----
+  // Only the messages the owner picked move; the personal work keeps the full
+  // record and its Agent session. Files in picked replies are stored in the target.
+  async handover(taskId, targetName, messageIds) {
+    if (!Array.isArray(messageIds) || !messageIds.length || messageIds.length > 30 || messageIds.some(id => typeof id !== 'string')) throw new Error('请选择 1–30 条要移交的消息');
+    const data = await this.store.read();
+    const source = data.tasks.find(item => item.id === taskId);
+    if (!source) throw new Error('工作不存在');
+    if (spaceNamed(data, source.workspace)?.type !== 'personal') throw new Error('只有个人空间的工作可以移交');
+    if (source.handedOver) throw new Error(`这项工作已移交到「${source.handedOver.workspace}」`);
+    if (['queued', 'running', 'awaiting-workbuddy'].includes(source.agentRun?.status) || this.queues.has(taskId)) throw new Error('Agent 还在处理这项工作，请完成后再移交');
+    const target = spaceNamed(data, targetName);
+    if (!target || !['team', 'project'].includes(target.type)) throw new Error('只能移交到团队或项目空间');
+    const picked = new Set(messageIds);
+    const chosen = source.messages.filter(item => picked.has(item.id) && ['user', 'assistant'].includes(item.role) && item.source !== 'connection-error' && !item.wecomOutbound && item.source !== 'workbuddy-pending');
+    if (chosen.length !== picked.size) throw new Error('所选消息不存在或不能移交');
+    const now = new Date().toISOString();
+    const task = createLocalTask({ goal: source.goal || source.title, workspace: target.name });
+    task.title = source.title;
+    task.status = 'running';
+    task.steps = [];
+    task.agentMode = source.agentMode;
+    task.handedOverFrom = { taskId: source.id, at: now };
+    task.messages[0].text = source.goal || source.title;
+    task.messages[0].handover = true;
+    const copies = [];
+    for (const item of chosen) {
+      const copy = { id: crypto.randomUUID(), role: item.role, text: item.text, createdAt: item.createdAt, handedOverFrom: item.id, ...(item.source ? { source: item.source } : {}) };
+      if (item.role === 'assistant') copy.replyToId = task.messages[0].id;
+      if (item.artifacts?.length && typeof this.documentService?.getFilePath === 'function') {
+        const paths = [];
+        for (const artifact of item.artifacts.slice(0, 10)) {
+          try { paths.push(await this.documentService.getFilePath(artifact.id)); } catch { /* removed meanwhile */ }
+        }
+        if (paths.length) {
+          const saved = await this.documentService.upload(target.id, paths, { origin: { taskId: task.id, taskTitle: task.title, workspace: target.name, agent: item.source, messageId: copy.id } });
+          copy.artifacts = saved.map(document => ({ id: document.id, name: document.name }));
+        }
+      }
+      copies.push(copy);
+    }
+    task.messages.push(...copies);
+    task.agentRun = { status: 'done', updatedAt: now };
+    task.createdAt = now;
+    task.updatedAt = now;
+    const saved = await this.store.update(draft => {
+      const current = draft.tasks.find(item => item.id === taskId);
+      if (!current) throw new Error('工作不存在');
+      if (current.handedOver) throw new Error(`这项工作已移交到「${current.handedOver.workspace}」`);
+      current.handedOver = { taskId: task.id, workspace: target.name, at: now, messageCount: copies.length };
+      current.updatedAt = now;
+      draft.tasks.unshift(task);
+      return draft;
+    });
+    this.publish(saved);
+    return task;
+  }
+
+  // The owner may let colleagues' follow-ups use the full conversation.
+  async setConversationShared(taskId, shared) {
+    let result;
+    const data = await this.store.update(draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (!task) throw new Error('工作不存在');
+      if (spaceNamed(draft, task.workspace)?.type === 'personal') throw new Error('个人空间的工作不能共享给同事');
+      task.conversationShared = Boolean(shared);
+      result = task;
+      return draft;
+    });
+    this.publish(data);
+    return result;
   }
 
   // ---- 进展：confirm, edit, dismiss, or add by hand ----
@@ -410,13 +556,18 @@ class TaskRunner {
       const items = extracted.found ? extracted.items : progress.fallbackProgress(extracted.text, answer.artifacts || []);
       const existing = (await this.store.read()).tasks.find(item => item.id === taskId)?.progress || [];
       drafts = progress.draft(progress.dedupe(items, existing), { sourceMessageId: answer.id, author: 'agent' });
+      const personalUse = drafts.length ? await this.personalContextOf(taskId, triggerId) : null;
+      if (personalUse) for (const item of drafts) item.personal = personalUse;
     }
+    const isolatedSession = Boolean(answer?.isolatedSession);
+    if (answer) delete answer.isolatedSession;
     const finished = await this.store.update(draft => {
       const current = draft.tasks.find(item => item.id === taskId);
       if (!current) return draft;
-      if (answer) current.messages.push({ ...answer, replyToId: triggerId });
+      if (answer) { const { agentSessionId, agentSessionOwner, ...visible } = answer; current.messages.push({ ...(isolatedSession ? visible : answer), replyToId: triggerId }); }
       if (drafts.length) current.progress = [...(current.progress || []), ...drafts].slice(-200);
-      if (answer?.agentSessionId) {
+      // A colleague's isolated run must not replace (or reveal) the owner's Agent session.
+      if (answer?.agentSessionId && !isolatedSession) {
         current.agentSessionId = answer.agentSessionId;
         if ('agentSessionOwner' in answer) current.agentSessionOwner = answer.agentSessionOwner;
       }
@@ -496,13 +647,38 @@ class TaskRunner {
   }
 
   async markInterrupted() {
+    const interrupted = [];
     const data = await this.store.update(draft => {
       for (const task of draft.tasks) {
-        if (['queued', 'running'].includes(task.agentRun?.status)) task.agentRun = { ...task.agentRun, status: 'interrupted', updatedAt: new Date().toISOString() };
+        if (['queued', 'running'].includes(task.agentRun?.status)) {
+          interrupted.push({ taskId: task.id, triggerId: task.agentRun.triggerId });
+          task.agentRun = { ...task.agentRun, status: 'interrupted', updatedAt: new Date().toISOString() };
+        }
       }
       return draft;
     });
+    this.interruptedAtStart = interrupted;
     this.publish(data);
+  }
+
+  // After the app restarts, CloudAgent work that was running is picked up
+  // again: the sandbox kept working, and the run finds its own turn in the
+  // session replay (or waits for it to finish) instead of sending it twice.
+  async resumeCloudRuns() {
+    const pending = this.interruptedAtStart || [];
+    this.interruptedAtStart = [];
+    if (!pending.length) return [];
+    const runtime = await this.settingsService.getRuntimeConfig();
+    const data = await this.store.read();
+    const resumed = [];
+    for (const { taskId, triggerId } of pending) {
+      const task = data.tasks.find(item => item.id === taskId);
+      if (!task || task.agentRun?.status !== 'interrupted' || task.agentRun.triggerId !== triggerId) continue;
+      if ((task.agentMode || runtime.agent?.mode) !== 'cloudagent' || this.queues.has(taskId)) continue;
+      this.schedule(taskId, triggerId);
+      resumed.push(taskId);
+    }
+    return resumed;
   }
 }
 

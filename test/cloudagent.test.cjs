@@ -102,7 +102,10 @@ test('首次执行：为这项工作建沙箱并等就绪，新建会话，流�
   assert.match(result.text, /^已完成：沙箱为空。/);
   assert.match(result.text, /已拒绝：rm -rf build/);
   assert.deepEqual(state.permissionAnswers[0].result, { outcome: { outcome: 'selected', optionId: 'r' } });
-  assert.ok(progress.some(p => p.step === 'ls /workspace'));
+  assert.ok(progress.some(p => p.step === '运行命令 ls /workspace'), '步骤用人话显示');
+  assert.ok(progress.every(p => p.startedAt > 0), '进度带开始时间');
+  assert.ok(progress.some(p => p.lastActivityAt > 0), '进度带最近动作时间');
+  assert.ok(!state.prompts[0].prompt[0].text.includes('【共作消息'), '没有消息 id 时不加编号');
   assert.match(state.prompts[0].prompt[0].text, /看看沙箱里有什么/);
 });
 

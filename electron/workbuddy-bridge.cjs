@@ -206,7 +206,8 @@ class WorkBuddyBridge {
       if (method === 'POST' && !id) {
         const goal = typeof body.goal === 'string' ? body.goal.trim() : '';
         if (!goal || goal.length > 2000) throw new BridgeError(400, '工作目标无效（1–2000 字）');
-        const workspace = body.workspace == null ? data.activeWorkspace : String(body.workspace);
+        // Like any new work, WorkBuddy's goes to the personal space unless a space is named.
+        const workspace = body.workspace == null ? (data.workspaces.find(space => space.type === 'personal')?.name || data.activeWorkspace) : String(body.workspace);
         const task = await this.ops.create(this.actor, { workspace, goal, options: { agentMode: 'workbuddy' } });
         return { ...summarizeTask(task), triggerId: task.agentRun?.triggerId || null };
       }

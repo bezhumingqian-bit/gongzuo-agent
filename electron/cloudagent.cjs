@@ -18,7 +18,12 @@ const { AcpConnection, buildCloudPrompt, updateText } = require('./workbuddy-clo
 const API_BASE = 'https://www.codebuddy.cn/v2/agentos';
 const SOURCE_APP = 'gongzuo';
 const KEYCHAIN_SERVICE = 'cn.gongzuo.codebuddy.api-key';
-const TURN_TIMEOUT_MS = 15 * 60 * 1000;
+// A turn has no fixed length. No update for IDLE_RECONNECT_MS means the
+// channel is reopened to check (the cloud keeps working meanwhile); a turn is
+// only stopped after MAX_TURN_MS (the sandbox's first lifetime window).
+const IDLE_RECONNECT_MS = 5 * 60 * 1000;
+const MAX_TURN_MS = 2 * 60 * 60 * 1000;
+const RECONNECT_DELAYS = [2000, 5000, 10000, 20000, 30000, 30000];
 const READY_TIMEOUT_MS = 4 * 60 * 1000;
 const MAX_TEXT = 50000;
 const ALLOWED_KINDS = new Set(['read', 'search', 'think', 'fetch', 'edit']);
@@ -141,9 +146,41 @@ function permissionReply(request, declined) {
   return reject ? { outcome: { outcome: 'selected', optionId: reject.optionId } } : { outcome: { outcome: 'cancelled' } };
 }
 
+// Human wording for one tool step, shown as "正在<step>".
+function humanStep(update = {}) {
+  const title = String(update.title || '').replace(/\x60/g, '').split('\n')[0].trim();
+  const file = (title.match(/[\p{L}\p{N}_.-]+\.[A-Za-z0-9]{1,6}(?=\s|$|['")\]])/gu) || []).pop();
+  const command = title.split(/&&|;|\|/).map(part => part.trim()).filter(Boolean).pop() || title;
+  switch (update.kind) {
+    case 'execute': return `运行命令 ${command.slice(0, 48)}`;
+    case 'read': return file ? `读取 ${file}` : '读取文件';
+    case 'edit': return file ? `编辑 ${file}` : '编辑文件';
+    case 'delete': return file ? `删除 ${file}` : '删除文件';
+    case 'move': return '移动文件';
+    case 'search': return '搜索文件';
+    case 'fetch': return '查阅网页';
+    case 'think': return '思考';
+    default: return title.slice(0, 60) || '执行一步';
+  }
+}
+
+const norm = value => String(value || '').replace(/\s+/g, '');
+// Short, stable tag of the 共作 message id (hashed, so ids sharing a prefix never collide).
+const turnMarker = id => (id ? `【共作消息 ${crypto.createHash('sha256').update(String(id)).digest('hex').slice(0, 10)}】` : '');
+const userChunkText = update => typeof update?.content === 'string' ? update.content : String(update?.content?.text || update?.text || '');
+
+// One 共作 request = one ACP prompt. The turn has no fixed length: it ends
+// when the agent ends it. A connection that breaks or stays silent for
+// idleMs is reopened; session/load replays the history (each prompt starts
+// with a user_message_chunk, each turn ends with session/endTurn) and then
+// keeps streaming the live turn, so the reply is picked up where it was.
+// The prompt carries a short message tag, which is how a reconnect (or a
+// retry after the app restarted) recognises its own turn in the replay.
 async function callCloudAgent(config, messages, workspace, memoryContext = {}, options = {}) {
+  const timing = { idleMs: IDLE_RECONNECT_MS, maxTurnMs: MAX_TURN_MS, reconnectDelays: RECONNECT_DELAYS, checkMs: 15000, loadMs: 120000, ...(options.timing || {}) };
   const fetchImpl = options.fetchImpl || fetch;
   const onProgress = options.onProgress || (() => {});
+  const sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const apiKey = config.cloudagentApiKey;
   const client = options.client || new CloudAgentClient({ apiKey, base: config.cloudagentApiBase || API_BASE, fetchImpl });
   const [savedRuntime, savedSession] = String(options.sessionId || '').split(':');
@@ -152,65 +189,187 @@ async function callCloudAgent(config, messages, workspace, memoryContext = {}, o
     : null;
   runtime ||= await findOrCreateRuntime(client, { workspace, workId: options.workId, title: options.title }, apiKey);
   const runtimeId = String(runtime.id);
-  const { link, ticket } = acpOf(runtime);
+  let link = acpOf(runtime);
+  const marker = turnMarker(options.triggerId || messages.at(-1)?.id);
 
-  let text = '';
-  let prompting = false;
-  const steps = [];
-  const declined = [];
-  const connection = new AcpConnection({
-    link, ticket, fetchImpl,
-    onNotification: message => {
-      // session/load replays history first; only collect output of this turn.
-      if (!prompting || message.method !== 'session/update') return;
-      const piece = updateText(message.params);
-      if (piece.kind === 'agent_message_chunk' && piece.text) {
-        text = (text + piece.text).slice(0, MAX_TEXT);
-        onProgress({ text });
-      } else if (piece.kind === 'tool_call' && piece.update?.title) {
-        steps.push(String(piece.update.title).slice(0, 80));
-        onProgress({ step: steps.at(-1), text });
-      }
-    },
-    onRequest: async request => request.method === 'session/request_permission' ? permissionReply(request, declined) : {}
+  const startedAt = Date.now();
+  const turn = { sessionId: runtimeId === savedRuntime ? savedSession || null : null, prompt: null, text: '', previous: '', steps: 0, step: '', latest: 'text', declined: [], stopReason: null, timedOut: false };
+  let lastAgentActivity = 0;
+  const report = (extra = {}) => onProgress({
+    text: turn.text, ...(turn.latest === 'step' && turn.step ? { step: turn.step } : {}),
+    steps: turn.steps, startedAt, ...(lastAgentActivity ? { lastActivityAt: lastAgentActivity } : {}), phase: 'working', ...extra
   });
-  const deadline = setTimeout(() => connection.close(), TURN_TIMEOUT_MS);
-  try {
-    await connection.open();
-    await connection.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } });
-    let sessionId = runtimeId === savedRuntime ? savedSession : null;
-    let resume = false;
-    if (sessionId) {
-      try { await connection.call('session/load', { sessionId, cwd: '/workspace', mcpServers: [] }, 120000); resume = true; }
-      catch { sessionId = null; }
-    }
-    if (!sessionId) {
-      const created = await connection.call('session/new', { cwd: '/workspace', mcpServers: [] });
-      sessionId = String(created?.sessionId || '');
-      if (!sessionId) throw new CloudAgentError('CloudAgent 没有返回会话 ID');
-      await connection.call('session/set_mode', { sessionId, modeId: 'acceptEdits' }).catch(() => {});
-    }
-    prompting = true;
-    const result = await connection.call('session/prompt', {
-      sessionId,
-      prompt: [{ type: 'text', text: buildCloudPrompt(messages, workspace, memoryContext, resume) }]
-    }, TURN_TIMEOUT_MS);
-    const stopReason = result?.stopReason || 'end_turn';
-    const notes = [];
-    if (stopReason !== 'end_turn') notes.push(`（CloudAgent 本轮结束原因：${({ max_tokens: '达到输出上限', max_turn_requests: '达到轮次上限', refusal: '模型拒绝', cancelled: '已取消' })[stopReason] || stopReason}）`);
-    if (declined.length) notes.push(`（CloudAgent 请求执行需确认的操作，共作尚不支持在此确认，已拒绝：${[...new Set(declined)].join('、')}）`);
-    const body = text.trim() || 'CloudAgent 没有返回文字结果。';
-    return { text: [body, ...notes].join('\n\n').slice(0, MAX_TEXT), sessionId: `${runtimeId}:${sessionId}`, stopReason };
-  } catch (error) {
-    if (error.expired && !options.retried) {
-      clearTimeout(deadline); connection.close();
-      return callCloudAgent(config, messages, workspace, memoryContext, { ...options, sessionId: `${runtimeId}:${savedRuntime === runtimeId ? savedSession || '' : ''}`, retried: true });
-    }
-    throw error;
-  } finally {
-    clearTimeout(deadline);
-    connection.close();
+
+  function connectOnce() {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let loaded = false;
+      let mode = 'replay';
+      let attachedAt = Date.now();
+      let snapshot = null;
+      const replay = [];
+      let connection = null;
+      let watch = null;
+      const settle = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(watch);
+        connection?.close();
+        fn(value);
+      };
+      const done = () => settle(resolve, { done: true });
+      const drop = error => settle(reject, Object.assign(error instanceof Error ? error : new Error(String(error)), { attached: loaded }));
+      const fatal = error => settle(reject, Object.assign(error, { fatal: true }));
+
+      const sendPrompt = () => {
+        mode = 'mine';
+        turn.text = '';
+        report();
+        connection.call('session/prompt', { sessionId: turn.sessionId, prompt: [{ type: 'text', text: turn.prompt }] }, timing.maxTurnMs + 60000)
+          .then(result => { turn.stopReason ||= result?.stopReason || 'end_turn'; done(); })
+          .catch(error => {
+            if (settled || turn.timedOut) return;
+            if (error.busy) { mode = 'previous'; report({ phase: 'waiting-previous' }); return; }
+            if (error.rpc) { fatal(new CloudAgentError(`CloudAgent 执行出错：${String(error.message || '').replace(/^云端任务出错：/, '').slice(0, 160)}`)); return; }
+            drop(error);
+          });
+      };
+
+      const liveEnd = stopReason => {
+        if (mode === 'previous') { sendPrompt(); return; }
+        if (mode === 'mine') { turn.stopReason = stopReason || 'end_turn'; done(); }
+      };
+
+      connection = new AcpConnection({
+        link: link.link, ticket: link.ticket, fetchImpl, strictStreams: true,
+        onDrop: error => drop(error),
+        onNotification: message => {
+          const params = message.params || {};
+          const update = params.update || {};
+          if (!loaded) {
+            // History replay: rebuild the turns to find this request's own.
+            if (message.method === 'session/endTurn') { const last = replay.at(-1); if (last) { last.ended = true; last.stopReason = params.stopReason; } return; }
+            if (message.method !== 'session/update') return;
+            const piece = updateText(params);
+            if (piece.kind === 'user_message_chunk') {
+              const last = replay.at(-1);
+              if (last && !last.text && !last.ended) last.user += userChunkText(update);
+              else replay.push({ user: userChunkText(update), text: '', ended: false });
+            } else if (piece.kind === 'agent_message_chunk' && piece.text) {
+              const last = replay.at(-1);
+              if (last) last.text = (last.text + piece.text).slice(0, MAX_TEXT);
+            } else if (piece.kind === 'session_info_update' && update._meta?.['codebuddy.ai']?.isSnapshot) {
+              snapshot = update._meta['codebuddy.ai'].status || snapshot;
+            }
+            return;
+          }
+          lastAgentActivity = Date.now();
+          if (message.method === 'session/endTurn') { liveEnd(params.stopReason); return; }
+          if (message.method === 'session/update') {
+            const piece = updateText(params);
+            if (piece.kind === 'agent_message_chunk' && piece.text) {
+              if (mode === 'mine') turn.text = (turn.text + piece.text).slice(0, MAX_TEXT);
+              else if (mode === 'previous') turn.previous = (turn.previous + piece.text).slice(0, MAX_TEXT);
+              turn.latest = 'text';
+            } else if (piece.kind === 'tool_call') {
+              turn.steps += 1;
+              turn.step = humanStep(update);
+              turn.latest = 'step';
+            }
+          }
+          report(mode === 'previous' ? { phase: 'waiting-previous' } : {});
+        },
+        onRequest: async request => request.method === 'session/request_permission' ? permissionReply(request, turn.declined) : {}
+      });
+
+      watch = setInterval(() => {
+        const now = Date.now();
+        if (now - startedAt > timing.maxTurnMs) {
+          clearInterval(watch);
+          turn.timedOut = true;
+          Promise.resolve(loaded && turn.sessionId ? connection.notify('session/cancel', { sessionId: turn.sessionId }) : null).finally(done);
+        } else if (now - Math.max(lastAgentActivity, attachedAt) > timing.idleMs) {
+          // Silent for too long: the stream may have died without closing. Reopen to check.
+          drop(Object.assign(new Error('云端长时间没有动静'), { idle: true }));
+        }
+      }, timing.checkMs);
+
+      (async () => {
+        try {
+          await connection.open();
+          await connection.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } });
+          let resume = false;
+          if (turn.sessionId) {
+            try { await connection.call('session/load', { sessionId: turn.sessionId, cwd: '/workspace', mcpServers: [] }, timing.loadMs); resume = true; }
+            catch (error) {
+              if (!error.rpc) throw error;
+              if (turn.prompt) throw Object.assign(new CloudAgentError('CloudAgent 会话已失效，这一轮的结果无法取回，请重试'), { fatal: true });
+              turn.sessionId = null;
+            }
+          }
+          if (!turn.sessionId) {
+            const created = await connection.call('session/new', { cwd: '/workspace', mcpServers: [] });
+            turn.sessionId = String(created?.sessionId || '');
+            if (!turn.sessionId) throw Object.assign(new CloudAgentError('CloudAgent 没有返回会话 ID'), { fatal: true });
+            await connection.call('session/set_mode', { sessionId: turn.sessionId, modeId: 'acceptEdits' }).catch(() => {});
+          }
+          turn.prompt ??= `${buildCloudPrompt(messages, workspace, memoryContext, resume)}${marker ? `\n\n${marker}` : ''}`;
+          loaded = true;
+          attachedAt = Date.now();
+          const mine = marker ? [...replay].reverse().find(item => norm(item.user).includes(norm(marker))) : null;
+          if (mine) {
+            // This request already reached the agent (before a drop, or before the app restarted).
+            turn.text = mine.text;
+            // Ended in the replay, or the session is idle although no end was replayed.
+            if (mine.ended || (snapshot && snapshot !== 'working')) { turn.stopReason = mine.stopReason || 'end_turn'; done(); return; }
+            mode = 'mine';
+            report();
+            return;
+          }
+          if (snapshot === 'working') {
+            // An earlier request is still running in this session; wait for it, then send ours.
+            turn.previous = replay.at(-1)?.text || '';
+            mode = 'previous';
+            report({ phase: 'waiting-previous' });
+            return;
+          }
+          sendPrompt();
+        } catch (error) {
+          if (error.fatal) fatal(error);
+          else if (error.rpc) fatal(new CloudAgentError(`CloudAgent 接口出错：${String(error.message || '').slice(0, 160)}`));
+          else drop(error);
+        }
+      })();
+    });
   }
+
+  let failures = 0;
+  for (;;) {
+    try {
+      await connectOnce();
+      break;
+    } catch (error) {
+      if (error.fatal) throw error;
+      failures = error.attached ? 1 : failures + 1;
+      if (Date.now() - startedAt > timing.maxTurnMs) { turn.timedOut = true; break; }
+      if (failures > timing.reconnectDelays.length) {
+        throw new CloudAgentError('与 CodeBuddy 云端的连接断开，多次重连未成功。云端可能仍在执行，稍后点「重试」即可取回这一轮的结果');
+      }
+      report({ phase: 'reconnecting', attempt: failures });
+      await sleep(timing.reconnectDelays[failures - 1]);
+      try { runtime = await client.waitReady(await client.getRuntime(runtimeId)); link = acpOf(runtime); }
+      catch (refreshError) { if (refreshError instanceof CloudAgentError && /无效或无权限/.test(refreshError.message)) throw refreshError; }
+    }
+  }
+
+  const stopReason = turn.timedOut ? 'timeout' : turn.stopReason || 'end_turn';
+  const notes = [];
+  if (turn.timedOut) notes.push(`（这一轮已运行 ${Math.round(timing.maxTurnMs / 3600000 * 10) / 10} 小时仍未结束，共作已请云端停止；以上是已产出的部分）`);
+  else if (stopReason !== 'end_turn') notes.push(`（CloudAgent 本轮结束原因：${({ max_tokens: '达到输出上限', max_turn_requests: '达到轮次上限', refusal: '模型拒绝', cancelled: '已取消' })[stopReason] || stopReason}）`);
+  if (turn.declined.length) notes.push(`（CloudAgent 请求执行需确认的操作，共作尚不支持在此确认，已拒绝：${[...new Set(turn.declined)].join('、')}）`);
+  const body = turn.text.trim() || (turn.timedOut ? '' : 'CloudAgent 没有返回文字结果。');
+  const earlier = turn.previous.trim() ? `【上一条请求在云端已完成】\n${turn.previous.trim()}\n\n---\n\n` : '';
+  return { text: (earlier + [body, ...notes].filter(Boolean).join('\n\n')).slice(0, MAX_TEXT), sessionId: `${runtimeId}:${turn.sessionId}`, stopReason };
 }
 
 async function checkCloudAgent(config, fetchImpl = fetch) {
@@ -220,4 +379,4 @@ async function checkCloudAgent(config, fetchImpl = fetch) {
   return { ok: true, message: `CodeBuddy CloudAgent 可访问（共作名下云端沙箱 ${total} 个）；每项工作首次执行时会创建自己的沙箱` };
 }
 
-module.exports = { callCloudAgent, checkCloudAgent, CloudAgentClient, CloudAgentError, spaceManifest, spaceKey, workKey, parseLossless, permissionReply, readKeychainKey, KEYCHAIN_SERVICE, API_BASE };
+module.exports = { humanStep, callCloudAgent, checkCloudAgent, CloudAgentClient, CloudAgentError, spaceManifest, spaceKey, workKey, parseLossless, permissionReply, readKeychainKey, KEYCHAIN_SERVICE, API_BASE };

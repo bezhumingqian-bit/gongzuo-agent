@@ -22,6 +22,10 @@ function savedModelKey(credentials, settings, provider = settings.model.provider
   return credentials.modelKeys?.[provider] || (provider === settings.model.provider ? credentials.modelKey : null);
 }
 
+function normalizePrivacy(input = {}) {
+  return { personalLocalOnly: input.personalLocalOnly === true };
+}
+
 function endpoint(value, field, optional = false) {
   const raw = String(value ?? '').trim();
   if (optional && !raw) return '';
@@ -77,7 +81,8 @@ function normalizeSettings(input = {}) {
     wecom: { organizationId, applicationId, recipientUserId, botId, messageScope },
     profile: { name: profileName, wecomUserId: profileWecom, feishuUserId: profileFeishu },
     feishu: { appId: feishuAppId, domain: feishuDomain },
-    workflow: normalizeWorkflow(input.workflow)
+    workflow: normalizeWorkflow(input.workflow),
+    ...(input.privacy ? { privacy: normalizePrivacy(input.privacy) } : {})
   };
 }
 
@@ -122,6 +127,12 @@ class SettingsService {
   async writeWorkbuddyOAuth(record) {
     const value = record ? this.encrypt(JSON.stringify(record)) : null;
     await this.credentials.update(current => ({ ...current, workbuddyOAuth: value }));
+  }
+
+  async setPrivacy(input = {}) {
+    const privacy = normalizePrivacy(input);
+    await this.settings.update(current => ({ ...current, privacy }));
+    return this.getPublic();
   }
 
   async getWorkbuddyClient() {
@@ -174,6 +185,7 @@ class SettingsService {
   async save(input = {}) {
     const settings = normalizeSettings(input);
     const previousSettings = await this.settings.read();
+    if (!settings.privacy && previousSettings.privacy) settings.privacy = previousSettings.privacy;
     settings.modelProfiles = {
       ...(previousSettings.modelProfiles || {}),
       [previousSettings.model.provider]: previousSettings.model,

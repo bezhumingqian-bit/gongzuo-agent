@@ -222,11 +222,30 @@ function registerIpc() {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     const goal = assertString(input.goal, '工作目标');
     const current = await store.read();
-    const workspace = current.workspaces.some(item => item.name === input.workspace) ? input.workspace : current.activeWorkspace;
+    // New work starts in the personal space unless a space was chosen.
+    const workspace = current.workspaces.some(item => item.name === input.workspace) ? input.workspace : personalWorkspace(current)?.name || current.activeWorkspace;
     const mentions = Array.isArray(input.mentions) ? input.mentions.slice(0, 10) : [];
     const task = await workOps.create(actors.local(), { workspace, goal, documentIds: input.documentIds || [], relatedWorkspaces: Array.isArray(input.relatedWorkspaces) ? input.relatedWorkspaces.slice(0, 10) : null, options: mentions.length ? { mentions } : {} });
     if (task.messages?.[0]?.mentions?.length) await wecomDelivery.sendMentions(task.id, task.messages[0].id);
     return (await store.read()).tasks.find(item => item.id === task.id) || task;
+  });
+
+  ipcMain.handle('tasks:handover', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const taskId = assertString(input.taskId, '任务 ID', 100);
+    const workspace = assertString(input.workspace, '工作空间', 80);
+    const messageIds = Array.isArray(input.messageIds) ? input.messageIds.slice(0, 30).map(id => assertString(id, '消息 ID', 100)) : [];
+    return workOps.handover(actors.local(), taskId, { workspace, messageIds });
+  });
+
+  ipcMain.handle('tasks:set-conversation-shared', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    return workOps.setConversationShared(actors.local(), assertString(input.taskId, '任务 ID', 100), input.shared === true);
+  });
+
+  ipcMain.handle('settings:set-privacy', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    return settingsService.setPrivacy({ personalLocalOnly: input.personalLocalOnly === true });
   });
 
   ipcMain.handle('tasks:append-message', async (event, input = {}) => {
@@ -474,6 +493,7 @@ function registerIpc() {
         content: next.content,
         category: next.category,
         tags: next.tags,
+        ...(scope === 'personal' ? { portable: next.portable } : {}),
         updatedAt: new Date().toISOString()
       });
       updated = item;
@@ -609,6 +629,7 @@ app.whenReady().then(async () => {
   await wecomBot.restart('startup');
   createMenu();
   createWindow();
+  taskRunner.resumeCloudRuns().catch(error => console.error('续接云端执行失败：', error.message));
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

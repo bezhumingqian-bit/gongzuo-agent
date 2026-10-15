@@ -32,6 +32,8 @@ function createMemory(input, { scope, workspaceId = null, sourceTaskId = null, s
     content: compactText(input.content, '内容', 2000),
     category: CATEGORIES.has(input.category) ? input.category : '其他',
     tags: normalizeTags(input.tags),
+    // Personal memory stays in personal work unless marked portable (「可随我带入团队」).
+    ...(scope === 'personal' ? { portable: input.portable === true } : {}),
     source: sourceTaskId ? { type: 'task', taskId: sourceTaskId, excerpt: String(sourceExcerpt || '').slice(0, 500) } : { type: 'manual' },
     status: 'active',
     confirmedBy: OWNER_ID,

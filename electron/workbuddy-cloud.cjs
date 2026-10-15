@@ -16,7 +16,10 @@ const path = require('node:path');
 const { requestJson, conversationInput } = require('./connection-service.cjs');
 
 const API_BASE = 'https://www.workbuddy.cn/openapi/v2';
-const TURN_TIMEOUT_MS = 10 * 60 * 1000;
+// No fixed turn length: a turn stops only after IDLE_LIMIT_MS without any
+// update from the cloud, or after the MAX_TURN_MS safety ceiling.
+const IDLE_LIMIT_MS = 10 * 60 * 1000;
+const MAX_TURN_MS = 2 * 60 * 60 * 1000;
 const RPC_TIMEOUT_MS = 60 * 1000;
 const MAX_TEXT = 50000;
 const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
@@ -57,9 +60,18 @@ async function getCloudTask(config, taskId, fetchImpl = fetch) {
 }
 
 // Minimal SSE + POST JSON-RPC client for one ACP connection.
+//
+// Error kinds callers can tell apart: `rpc` (the agent answered with a
+// JSON-RPC error), `busy` (HTTP 409, the session is still running an earlier
+// prompt), `expired` (HTTP 401) and `dropped` (the channel itself broke).
+// `onDrop` fires once when the receive stream breaks without close().
+// `strictStreams`: a streamed POST reply that ends without the response for
+// its request counts as a dropped channel instead of waiting forever.
+const dropped = message => Object.assign(new Error(message), { dropped: true });
+
 class AcpConnection {
-  constructor({ link, ticket, fetchImpl = fetch, onNotification = () => {}, onRequest = async () => ({}) }) {
-    Object.assign(this, { link, ticket, fetchImpl, onNotification, onRequest });
+  constructor({ link, ticket, fetchImpl = fetch, onNotification = () => {}, onRequest = async () => ({}), onDrop = () => {}, strictStreams = false }) {
+    Object.assign(this, { link, ticket, fetchImpl, onNotification, onRequest, onDrop, strictStreams });
     this.pending = new Map();
     this.nextId = 1;
     this.controller = new AbortController();
@@ -71,11 +83,18 @@ class AcpConnection {
     let response;
     try {
       response = await this.fetchImpl(this.link, { method: 'GET', headers: { ...auth(this.ticket), accept: 'text/event-stream' }, signal: this.controller.signal, redirect: 'error' });
-    } catch { throw new Error('无法连接 WorkBuddy 云端任务通道'); }
-    if (response.status === 401) throw Object.assign(new Error('WorkBuddy 云端任务凭据已过期'), { expired: true });
-    if (!response.ok || !response.body) throw new Error(`WorkBuddy 云端任务通道返回 HTTP ${response.status}`);
+    } catch { throw dropped('无法连接云端任务通道'); }
+    if (response.status === 401) throw Object.assign(new Error('云端任务凭据已过期'), { expired: true });
+    if (!response.ok || !response.body) throw dropped(`云端任务通道返回 HTTP ${response.status}`);
     this.connectionId = response.headers.get('acp-connection-id');
-    this.reading = this.read(response.body).catch(error => this.fail(error));
+    this.reading = this.read(response.body).catch(() => this.drop(dropped('云端任务通道已断开')));
+  }
+
+  drop(error) {
+    if (this.closed || this.droppedOnce) return;
+    this.droppedOnce = true;
+    this.fail(error);
+    this.onDrop(error);
   }
 
   // Parses an SSE body and dispatches each JSON-RPC message. Used for the GET
@@ -96,7 +115,7 @@ class AcpConnection {
     }
     const rest = buffer.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
     if (rest) this.dispatch(rest);
-    if (primary && !this.closed) this.fail(new Error('WorkBuddy 云端任务通道已断开'));
+    if (primary && !this.closed) this.drop(dropped('云端任务通道已断开'));
   }
 
   dispatch(raw) {
@@ -107,7 +126,7 @@ class AcpConnection {
       if (!waiter) return;
       this.pending.delete(message.id);
       clearTimeout(waiter.timer);
-      if (message.error) waiter.reject(new Error(`WorkBuddy 云端任务出错：${String(message.error.message || message.error.code || '').slice(0, 160)}`));
+      if (message.error) waiter.reject(Object.assign(new Error(`云端任务出错：${String(message.error.message || message.error.code || '').slice(0, 160)}`), { rpc: true, code: message.error.code }));
       else waiter.resolve(message.result ?? {});
       return;
     }
@@ -120,28 +139,44 @@ class AcpConnection {
   }
 
   async post(payload) {
-    const response = await this.fetchImpl(this.link, {
-      method: 'POST', redirect: 'error',
-      headers: { ...auth(this.ticket), 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(this.connectionId ? { 'acp-connection-id': this.connectionId } : {}) },
-      body: JSON.stringify(payload),
-      signal: this.controller.signal
-    });
-    if (response.status === 401) throw Object.assign(new Error('WorkBuddy 云端任务凭据已过期'), { expired: true });
-    if (response.status === 409) throw new Error('云端会话正在执行上一条请求，请稍后再试');
-    if (!response.ok) throw new Error(`WorkBuddy 云端任务返回 HTTP ${response.status}`);
+    let response;
+    try {
+      response = await this.fetchImpl(this.link, {
+        method: 'POST', redirect: 'error',
+        headers: { ...auth(this.ticket), 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(this.connectionId ? { 'acp-connection-id': this.connectionId } : {}) },
+        body: JSON.stringify(payload),
+        signal: this.controller.signal
+      });
+    } catch { throw dropped('云端任务通道请求失败'); }
+    if (response.status === 401) throw Object.assign(new Error('云端任务凭据已过期'), { expired: true });
+    if (response.status === 409) throw Object.assign(new Error('云端会话正在执行上一条请求，请稍后再试'), { busy: true });
+    if (!response.ok) throw Object.assign(new Error(`云端任务返回 HTTP ${response.status}`), { dropped: response.status >= 500 });
     if (/text\/event-stream/i.test(response.headers.get('content-type') || '') && response.body) {
       // Streamed reply (e.g. session/prompt): dispatch as it arrives; do not block the caller.
-      this.read(response.body, { primary: false }).catch(() => {});
+      const id = payload.id;
+      this.read(response.body, { primary: false })
+        .catch(() => {})
+        .then(() => {
+          if (!this.strictStreams || this.closed || id === undefined || !this.pending.has(id)) return;
+          const waiter = this.pending.get(id);
+          this.pending.delete(id);
+          clearTimeout(waiter.timer);
+          waiter.reject(dropped('云端回复流中断'));
+        });
       return;
     }
     const text = await response.text().catch(() => '');
     if (text.trim()) { try { const body = JSON.parse(text); if (body?.jsonrpc) this.dispatch(text); } catch { /* async result arrives on SSE */ } }
   }
 
+  notify(method, params) {
+    return this.post({ jsonrpc: '2.0', method, params }).catch(() => {});
+  }
+
   call(method, params, timeout = RPC_TIMEOUT_MS) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`WorkBuddy 云端任务响应超时（${method}）`)); }, timeout);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(dropped(`云端任务响应超时（${method}）`)); }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       this.post({ jsonrpc: '2.0', id, method, params }).catch(error => {
         clearTimeout(timer); this.pending.delete(id); reject(error);
@@ -215,9 +250,13 @@ async function callWorkBuddyCloud(config, messages, workspace, memoryContext = {
   const declined = [];
   const artifacts = new Map();
   const steps = [];
+  const startedAt = Date.now();
+  let lastActivity = startedAt;
+  let stopped = null;
   const connection = new AcpConnection({
     link: info.link, ticket: info.ticket, fetchImpl,
     onNotification: message => {
+      lastActivity = Date.now();
       if (message.method === '_codebuddy.ai/artifact' && message.params?.artifact?.uri) {
         const { event, artifact, url } = message.params;
         if (event === 'deleted') artifacts.delete(artifact.uri);
@@ -229,11 +268,11 @@ async function callWorkBuddyCloud(config, messages, workspace, memoryContext = {
       const piece = updateText(message.params);
       if (piece.kind === 'agent_message_chunk' && piece.text) {
         text = (text + piece.text).slice(0, MAX_TEXT);
-        onProgress({ text });
+        onProgress({ text, steps: steps.length, lastActivityAt: lastActivity, startedAt });
       } else if (piece.kind === 'tool_call' && piece.update?.title) {
         steps.push(String(piece.update.title).slice(0, 80));
-        onProgress({ step: steps.at(-1), text });
-      }
+        onProgress({ step: steps.at(-1), text, steps: steps.length, lastActivityAt: lastActivity, startedAt });
+      } else onProgress({ activity: true, steps: steps.length, lastActivityAt: lastActivity, startedAt });
     },
     onRequest: async request => {
       if (request.method === 'session/request_permission') {
@@ -243,7 +282,13 @@ async function callWorkBuddyCloud(config, messages, workspace, memoryContext = {
       return {};
     }
   });
-  const deadline = setTimeout(() => connection.close(), TURN_TIMEOUT_MS);
+  const watchdog = setInterval(() => {
+    const now = Date.now();
+    if (now - lastActivity > IDLE_LIMIT_MS) stopped = 'idle';
+    else if (now - startedAt > MAX_TURN_MS) stopped = 'max';
+    if (stopped) connection.close();
+  }, 15000);
+  const deadline = watchdog;
   try {
     await connection.open();
     await connection.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } } });
@@ -252,7 +297,7 @@ async function callWorkBuddyCloud(config, messages, workspace, memoryContext = {
     const result = await connection.call('session/prompt', {
       sessionId: info.taskId,
       prompt: [{ type: 'text', text: buildCloudPrompt(messages, workspace, memoryContext, resume) }]
-    }, TURN_TIMEOUT_MS);
+    }, MAX_TURN_MS);
     const stopReason = result?.stopReason || 'end_turn';
     const downloaded = artifacts.size ? await downloadArtifacts([...artifacts.values()], { link: info.link, ticket: info.ticket, fetchImpl }) : { saved: [], skipped: [] };
     const notes = [];
@@ -262,13 +307,15 @@ async function callWorkBuddyCloud(config, messages, workspace, memoryContext = {
     const body = text.trim() || (downloaded.saved.length ? '已生成文件，见下方成果。' : 'WorkBuddy 没有返回文字结果。');
     return { text: [body, ...notes].join('\n\n').slice(0, MAX_TEXT), sessionId: info.taskId, files: downloaded.saved, filesDirectory: downloaded.directory, stopReason };
   } catch (error) {
+    if (stopped === 'idle') throw new Error('WorkBuddy 云端 10 分钟没有任何动静，已停止等待；可以稍后重试');
+    if (stopped === 'max') throw new Error('WorkBuddy 云端这一轮已运行 2 小时仍未结束，已停止等待');
     if (error.expired && !options.retried) {
-      clearTimeout(deadline); connection.close();
+      clearInterval(deadline); connection.close();
       return callWorkBuddyCloud(config, messages, workspace, memoryContext, { ...options, sessionId: info.taskId, retried: true });
     }
     throw error;
   } finally {
-    clearTimeout(deadline);
+    clearInterval(deadline);
     connection.close();
   }
 }

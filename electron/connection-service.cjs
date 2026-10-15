@@ -48,7 +48,7 @@ function responseText(body) {
 
 function conversationInput(messages, memoryContext) {
   const notes = [...(memoryContext?.personal || []), ...(memoryContext?.team || [])]
-    .slice(0, 10).map(item => `- ${String(item.title || '').slice(0, 120)}: ${String(item.content || '').slice(0, 800)}`);
+    .slice(0, 12).map(item => `- ${String(item.title || '').slice(0, 120)}${item.inheritedFrom ? `（来自${String(item.inheritedFrom).slice(0, 40)}，上层规则，只读）` : ''}: ${String(item.content || '').slice(0, 800)}`);
   const spaces = memoryContext?.relatedWorkspaces?.length ? `\n这项工作同时关联到：${memoryContext.relatedWorkspaces.map(name => String(name).slice(0, 60)).join('、')}；团队记忆和可引用资料包含这些空间。` : '';
   const context = `${spaces}${notes.length ? `\n已确认的工作记忆：\n${notes.join('\n')}` : ''}`;
   const channel = memoryContext?.channelStatus;

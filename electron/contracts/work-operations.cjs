@@ -53,7 +53,8 @@ class WorkOperations {
     return unique.map(name => {
       const space = data.workspaces.find(item => item.name === name);
       if (!space) throw new WorkError('workspace-not-found', `工作空间不存在：${name}`);
-      if (space.type === 'personal') throw new WorkError('invalid-related', '个人空间不能作为关联空间；你的所有工作已自动留在个人空间');
+      if (space.type === 'personal') throw new WorkError('invalid-related', '个人空间不能作为关联空间；个人的过程不进入团队');
+      if (space.type === 'public') throw new WorkError('invalid-related', '公共空间的规范和口径会自动带给所有工作，不需要关联');
       this.check(actor, 'work.create', space);
       return space.name;
     });
@@ -63,6 +64,7 @@ class WorkOperations {
     const { data, space } = workspaceId
       ? await this.spaceBy(item => item.id === workspaceId, workspaceId)
       : await this.spaceBy(item => item.name === workspace, workspace);
+    if (space.type === 'public') throw new WorkError('no-work', '公共空间只放规范、模板和口径，不能发起工作；请在个人、团队或项目空间发起');
     this.check(actor, 'work.create', space);
     const related = this.relatedSpaces(actor, data, space.name, relatedWorkspaces);
     return this.taskRunner.create(goal, space.name, documentIds, origin, related.length ? { ...options, relatedWorkspaces: related } : options);
@@ -91,6 +93,24 @@ class WorkOperations {
     this.relatedSpaces(actor, data, task.workspace, added);
     const next = this.relatedSpaces({ type: 'local', id: 'policy-check' }, data, task.workspace, names);
     return this.taskRunner.setRelatedWorkspaces(task.id, next);
+  }
+
+  // Only the owner, from this app, hands a personal work over to a team or project.
+  async handover(actor, taskId, { workspace, messageIds }) {
+    if (actor?.type !== 'local') throw new WorkError('no-access', '只有本人可以移交个人空间的工作');
+    const { task } = await this.resolve(actor, taskId, 'work.append');
+    const data = await this.store.read();
+    const target = data.workspaces.find(item => item.name === workspace);
+    if (!target) throw new WorkError('workspace-not-found', `工作空间不存在：${workspace}`);
+    if (!['team', 'project'].includes(target.type)) throw new WorkError('invalid-related', '只能移交到团队或项目空间');
+    this.check(actor, 'work.create', target);
+    return this.taskRunner.handover(task.id, target.name, messageIds);
+  }
+
+  async setConversationShared(actor, taskId, shared) {
+    if (actor?.type !== 'local') throw new WorkError('no-access', '只有本人可以决定是否共享对话');
+    const { task } = await this.resolve(actor, taskId, 'work.append');
+    return this.taskRunner.setConversationShared(task.id, shared);
   }
 
   view(actor, taskId) {
