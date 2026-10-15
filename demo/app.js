@@ -287,6 +287,27 @@ function workLight(t){
   if(t.status==='review'||t.needsMe||(t.progress||[]).some(item=>item.status==='draft'))return {tone:'amber',label:'待确认'};
   return {tone:'green',label:'进行中'};
 }
+
+function progressAddBox(){
+  return `<form id="progress-add-form" class="progress-add-box"><strong>记一条进展</strong><select name="kind" aria-label="类型">${Object.entries(progressKinds).map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select><input name="text" maxlength="120" placeholder="例如：决定先迁移 A 区" aria-label="进展内容"><button class="dark-button" type="submit">同步到空间</button><button type="button" data-action="close-progress-add">取消</button></form>`;
+}
+// The key progress Agent extracted from this reply, confirmed right here.
+function replyProgress(t,m){
+  const items=(t.progress||[]).filter(item=>item.sourceMessageId===m.id);
+  if(!items.length)return '';
+  const drafts=items.filter(item=>item.status==='draft');
+  const published=items.filter(item=>item.status==='published');
+  if(!drafts.length){
+    if(!published.length)return '';
+    return `<div class="reply-progress done">${icon('check')}<span>已同步 ${published.length} 条进展到空间：${published.map(item=>`${progressTag(item.kind)}${safe(item.text)}`).join(' ')}</span><button data-action="progress-reopen" data-id="${safe(m.id)}">撤回</button></div>`;
+  }
+  const unchecked=state.progressUnchecked||{};
+  const editing=state.progressEditing;
+  const checkedCount=drafts.filter(item=>!unchecked[item.id]).length;
+  return `<div class="reply-progress" data-reply="${safe(m.id)}"><div class="reply-progress-head"><strong>本轮进展</strong><small>勾选的会同步到空间动态，团队只看到这些</small></div>${drafts.map(item=>editing===item.id
+    ?`<form class="reply-progress-row editing" data-progress-form="${safe(item.id)}"><select name="kind" aria-label="类型">${Object.entries(progressKinds).map(([key,label])=>`<option value="${key}" ${key===item.kind?'selected':''}>${label}</option>`).join('')}</select><input name="text" maxlength="120" value="${safe(item.text)}" aria-label="进展内容"><button type="button" data-action="progress-save-draft" data-id="${safe(item.id)}">好</button></form>`
+    :`<label class="reply-progress-row"><input type="checkbox" data-progress-check="${safe(item.id)}" ${unchecked[item.id]?'':'checked'}>${progressTag(item.kind)}<span>${safe(item.text)}</span><button type="button" class="reply-progress-edit" data-action="progress-edit" data-id="${safe(item.id)}">改</button></label>`).join('')}<div class="reply-progress-actions"><button class="dark-button" data-action="progress-confirm" data-id="${safe(m.id)}" ${checkedCount?'':'disabled'}>确认同步 ${checkedCount} 条</button><button data-action="progress-skip" data-id="${safe(m.id)}">这轮不同步</button></div></div>`;
+}
 function spaceWarRoom(name){
   const works=tasks.filter(t=>taskInSpace(t,name)&&!t.channelOnly).sort((a,b)=>Date.parse(b.updatedAt||b.createdAt||0)-Date.parse(a.updatedAt||a.createdAt||0));
   const feed=works.flatMap(t=>(t.progress||[]).filter(item=>item.status==='published').map(item=>({...item,task:t}))).sort((a,b)=>Date.parse(b.publishedAt||b.createdAt)-Date.parse(a.publishedAt||a.createdAt));
@@ -483,13 +504,13 @@ function conversation(){
   const setupMessage=ready?'刚才的消息已保存，但还没有交给当前 Agent。点击“回复上一条”即可继续。':mode==='built-in'?'当前工作使用内置 Agent，但模型尚未配置。消息只会保存，不会自动得到 AI 回复。':`${agentLabel(mode)} 尚未完成连接配置。消息只会保存，不会自动得到 AI 回复。`;
   const runMessage={'awaiting-workbuddy':t.agentRun?.claimedAt?'WorkBuddy 已领取，正在处理；完成后回复会出现在这里。':'已交给 WorkBuddy，等待它通过本机连接器领取。可以在 WorkBuddy 里说「处理共作待办」。',queued:'已保存工作，等待 Agent 执行。',running:t.agentRun?.progress?`Agent 正在处理：${t.agentRun.progress}`:'Agent 正在处理，你可以先查看其他工作。',failed:t.agentRun?.message||'本次调用失败，可以重试。',interrupted:'上次执行被中断，可以重试。','not-configured':setupMessage}[run];
   return `<section class="conversation-pane">
-    <div class="conversation-top"><div><strong>${safe(t.title)}</strong><span>${safe(spaceLabel(t))} · 工作对话</span></div><div class="conversation-actions-top"><button class="memory-task-button" data-action="extract-memory">${icon('book')}提炼记忆</button><button class="icon-button" data-action="toggle-people" aria-label="参与者" title="查看参与者">${icon('users')}</button>${t.id==='feedback'?`<button class="artifact-toggle ${state.artifactOpen?'active':''}" data-action="toggle-artifact">${icon('panel')}成果</button>`:''}<div class="task-menu-anchor"><button class="icon-button" data-action="toggle-task-menu" aria-label="更多任务操作" title="更多任务操作">${icon('dots')}</button>${state.quickPanel==='task-menu'?`<div class="task-menu-popover"><button data-action="extract-memory">${icon('book')}提炼记忆</button><button data-action="go-task-workspace">${icon('folder')}查看${safe(t.workspace||state.workspace)}资料</button><button data-action="show-task-info">${icon('file')}任务信息</button></div>`:''}</div></div></div>
-    ${desktopApi||t.progress?progressPanel(t):''}
+    <div class="conversation-top"><div><strong>${safe(t.title)}</strong><span>${safe(spaceLabel(t))} · 工作对话</span></div><div class="conversation-actions-top"><button class="memory-task-button" data-action="extract-memory">${icon('book')}提炼记忆</button><button class="icon-button" data-action="toggle-people" aria-label="参与者" title="查看参与者">${icon('users')}</button>${t.id==='feedback'?`<button class="artifact-toggle ${state.artifactOpen?'active':''}" data-action="toggle-artifact">${icon('panel')}成果</button>`:''}<div class="task-menu-anchor"><button class="icon-button" data-action="toggle-task-menu" aria-label="更多任务操作" title="更多任务操作">${icon('dots')}</button>${state.quickPanel==='task-menu'?`<div class="task-menu-popover"><button data-action="open-progress-add">${icon('plus')}记一条进展</button><button data-action="extract-memory">${icon('book')}提炼记忆</button><button data-action="go-task-workspace">${icon('folder')}查看${safe(t.workspace||state.workspace)}资料</button><button data-action="show-task-info">${icon('file')}任务信息</button></div>`:''}</div></div></div>
+    ${state.progressAddOpen?progressAddBox():''}
     <div class="thread"><div class="message user"><span class="message-avatar">明</span><div><small>${safe(messageAuthor(t.messages?.[0]))} · 10 分钟前</small><p>${safe(userText)}</p>${t.messages?.[0]?.documentRefs?.length?`<div class="message-documents">引用资料：${safe(t.messages[0].documentRefs.map(ref=>ref.name).join("、"))}</div>`:''}${t.messages?.[0]?.mentions?.length?`<div class="mention-delivery">${icon('bell')} @${safe(t.messages[0].mentions.map(item=>item.name).join('、'))} · ${(t.messages[0].mentionDeliveries||[]).length?t.messages[0].mentionDeliveries.map(item=>item.status==='sent'?`${safe(item.name)} 已发到${safe(channelLabel[item.channel]||'企微')}`:`${safe(item.name)} ${safe(item.detail||'未送达')}`).join('；'):'等待发送'}</div>`:''}${wecomMessageAction(t.messages?.[0],t.id)}</div></div>
       ${t.id==='feedback'?channelUpdate():''}
       ${showPlaceholder?`<div class="message agent"><span class="agent-avatar">${icon('spark')}</span><div><small>团队 Agent</small><p>${safe(agentText)}</p>${progressCard(t.id)}
       ${t.id==='feedback'?`<button class="result-card" data-action="toggle-artifact"><span class="result-thumb">${icon('app')}</span><span><strong>客户反馈管理 · v2</strong><small>${state.published?'已发布给产品团队':'已准备好，等待你的确认'}</small></span>${icon('chevron')}</button>${state.published?`<button class="open-live" data-action="open-app">打开应用 ${icon('external')}</button>`:`<div class="approval-row"><button class="soft-button" data-action="revise">继续修改</button><button class="dark-button" data-action="publish">${icon('check')}确认发布</button></div>`}`:''}
-      </div></div>`:''}${liveMessages.map(m=>m.role==='assistant'?`<div class="message agent"><span class="agent-avatar">${icon('spark')}</span><div><small>${m.source==='codebuddy'?'CodeBuddy':m.source==='codex'?'Codex':m.source==='kimi'?'Kimi Code':m.source==='cloudagent'?'CodeBuddy 云端':['workbuddy','workbuddy-pending'].includes(m.source)?(m.via==='cloud-task'?'WorkBuddy 云端':'WorkBuddy'):m.source==='external-agent'?'外部 Agent':'团队 Agent'} · ${m.source==='connection-error'?'调用失败':m.source==='workbuddy-pending'?'已发送，等待回复':'实际响应'}</small><p>${safe(m.text)}</p>${m.artifacts?.length?`<div class="message-documents">成果已存入空间资料：${safe(m.artifacts.map(item=>item.name).join('、'))}</div>`:''}${m.source==='workbuddy-pending'?`<button class="soft-button" data-action="sync-workbuddy" data-id="${safe(m.id)}">获取最新回复</button>`:''}${wecomMessageAction(m,t.id)}</div></div>`:`<div class="message user"><span class="message-avatar">明</span><div><small>${safe(messageAuthor(m))} · 刚刚</small><p>${safe(m.text)}</p>${m.documentRefs?.length?`<div class="message-documents">引用资料：${safe(m.documentRefs.map(ref=>ref.name).join("、"))}</div>`:''}${m.mentions?.length?`<div class="mention-delivery">${icon('bell')} @${safe(m.mentions.map(item=>item.name).join('、'))} · ${m.mentionDelivery==='demo'?'演示提醒，未真实送达':m.mentionDelivery==='sent'?'企微接口已接受，请在企微确认':m.mentionDeliveries?.length?m.mentionDeliveries.map(item=>item.status==='sent'?`${item.name} 已发到${channelLabel[item.channel]||'企微'}`:item.name+' '+(item.detail||'未送达')).join('；'):'等待发送'}</div>`:''}${wecomMessageAction(m,t.id)}</div></div>`).join('')}${desktopApi&&runMessage&&run!=='not-configured'?`<div class="agent-run-status"><span>${icon(['running','queued','awaiting-workbuddy'].includes(run)?'spark':'history')}${safe(runMessage)}</span>${['failed','interrupted'].includes(run)?`<button data-action="retry-agent">重试</button>`:''}</div>`:''}</div>
+      </div></div>`:''}${liveMessages.map(m=>m.role==='assistant'?`<div class="message agent"><span class="agent-avatar">${icon('spark')}</span><div><small>${m.source==='codebuddy'?'CodeBuddy':m.source==='codex'?'Codex':m.source==='kimi'?'Kimi Code':m.source==='cloudagent'?'CodeBuddy 云端':['workbuddy','workbuddy-pending'].includes(m.source)?(m.via==='cloud-task'?'WorkBuddy 云端':'WorkBuddy'):m.source==='external-agent'?'外部 Agent':'团队 Agent'} · ${m.source==='connection-error'?'调用失败':m.source==='workbuddy-pending'?'已发送，等待回复':'实际响应'}</small><p>${safe(m.text)}</p>${m.artifacts?.length?`<div class="message-documents">成果已存入空间资料：${safe(m.artifacts.map(item=>item.name).join('、'))}</div>`:''}${m.source==='workbuddy-pending'?`<button class="soft-button" data-action="sync-workbuddy" data-id="${safe(m.id)}">获取最新回复</button>`:''}${replyProgress(t,m)}${wecomMessageAction(m,t.id)}</div></div>`:`<div class="message user"><span class="message-avatar">明</span><div><small>${safe(messageAuthor(m))} · 刚刚</small><p>${safe(m.text)}</p>${m.documentRefs?.length?`<div class="message-documents">引用资料：${safe(m.documentRefs.map(ref=>ref.name).join("、"))}</div>`:''}${m.mentions?.length?`<div class="mention-delivery">${icon('bell')} @${safe(m.mentions.map(item=>item.name).join('、'))} · ${m.mentionDelivery==='demo'?'演示提醒，未真实送达':m.mentionDelivery==='sent'?'企微接口已接受，请在企微确认':m.mentionDeliveries?.length?m.mentionDeliveries.map(item=>item.status==='sent'?`${item.name} 已发到${channelLabel[item.channel]||'企微'}`:item.name+' '+(item.detail||'未送达')).join('；'):'等待发送'}</div>`:''}${wecomMessageAction(m,t.id)}</div></div>`).join('')}${desktopApi&&runMessage&&run!=='not-configured'?`<div class="agent-run-status"><span>${icon(['running','queued','awaiting-workbuddy'].includes(run)?'spark':'history')}${safe(runMessage)}</span>${['failed','interrupted'].includes(run)?`<button data-action="retry-agent">重试</button>`:''}</div>`:''}</div>
     <div class="thread-composer">${desktopApi&&run==='not-configured'?`<div class="agent-setup-banner"><span>${icon('spark')}${safe(setupMessage)}</span><div>${ready?`<button data-action="retry-agent">回复上一条</button>`:mode==='built-in'?`<button data-action="open-model-settings">配置模型</button>`:''}<button data-action="toggle-capabilities" data-id="agent">选择 Agent</button></div></div>`:''}${composer('thread-input',true)}<span class="composer-note">Enter 交给 Agent · @ 同事会同时通知到他的企微</span></div>
   </section>`;
 }
@@ -1012,7 +1033,30 @@ root.addEventListener('click',async(event)=>{
   }
   if(action==='toggle-task-menu'){state.quickPanel=state.quickPanel==='task-menu'?null:'task-menu';render()}
   if(action==='show-task-info'){state.quickPanel='task-info';render()}
-  if(action==='toggle-progress-panel'){state.progressOpen=state.progressOpen===false;render()}
+  if(action==='open-progress-add'){state.progressAddOpen=true;state.quickPanel=null;render();root.querySelector('#progress-add-form input')?.focus()}
+  if(action==='close-progress-add'){state.progressAddOpen=false;render()}
+  if(action==='progress-save-draft'){
+    const task=tasks.find(item=>item.id===state.task);const form=root.querySelector(`[data-progress-form="${CSS.escape(id)}"]`);if(!task||!form)return;
+    const values=new FormData(form);const local=(task.progress||[]).find(item=>item.id===id);
+    try{const entry=desktopApi?await desktopApi.updateProgress({taskId:task.id,itemId:id,action:'edit',text:values.get('text'),kind:values.get('kind')}):null;if(local)Object.assign(local,entry||{text:String(values.get('text')).trim(),kind:values.get('kind')});state.progressEditing=null;render()}
+    catch(error){toast(error?.message||'修改失败')}
+  }
+  if(action==='progress-confirm'||action==='progress-skip'||action==='progress-reopen'){
+    const task=tasks.find(item=>item.id===state.task);if(!task)return;
+    const items=(task.progress||[]).filter(item=>item.sourceMessageId===id);
+    const unchecked=state.progressUnchecked||{};
+    const plan=action==='progress-reopen'
+      ?items.filter(item=>item.status!=='draft').map(item=>[item,'unpublish'])
+      :items.filter(item=>item.status==='draft').map(item=>[item,action==='progress-confirm'&&!unchecked[item.id]?'publish':'dismiss']);
+    try{
+      for(const [item,change] of plan){
+        const entry=desktopApi?await desktopApi.updateProgress({taskId:task.id,itemId:item.id,action:change}):null;
+        Object.assign(item,entry||{status:change==='publish'?'published':change==='dismiss'?'dismissed':'draft',publishedAt:change==='publish'?new Date().toISOString():null});
+      }
+      const sent=plan.filter(([,change])=>change==='publish').length;
+      render();toast(action==='progress-reopen'?'已撤回，可重新选择':sent?`已同步 ${sent} 条进展到空间`:'这轮进展不同步');
+    }catch(error){toast(error?.message||'操作失败')}
+  }
   if(action==='toggle-progress-all'){state.progressShowAll=!state.progressShowAll;render()}
   if(action==='toggle-war-all'){state.warShowAll=!state.warShowAll;render()}
   if(action==='toggle-feed-all'){state.feedShowAll=!state.feedShowAll;render()}
@@ -1280,6 +1324,13 @@ root.addEventListener('click',async(event)=>{
   if(action==='search'){state.quickPanel='search';state.searchQuery='';render();document.getElementById('global-search-input')?.focus()}
 });
 
+root.addEventListener('change',event=>{
+  const id=event.target?.dataset?.progressCheck;
+  if(!id)return;
+  state.progressUnchecked={...(state.progressUnchecked||{}),[id]:!event.target.checked};
+  render();
+});
+
 root.addEventListener('input',event=>{
   if(event.target.name==='recipientUserId'&&state.wecomSendTarget)state.wecomRecipientDraft=event.target.value;
   const field=event.target.dataset.memoryField;
@@ -1368,7 +1419,7 @@ root.addEventListener('submit',event=>{
   if(event.target.id==='project-member-form'){event.preventDefault();saveProjectMember(event.target)}
   if(event.target.id==='project-wecom-member-form'){event.preventDefault();linkWecomMember(event.target)}
   if(event.target.id==='project-feishu-member-form'){event.preventDefault();const values=new FormData(event.target);desktopApi.linkFeishuProjectMember({workspaceId:currentWorkspace()?.id,memberId:values.get('memberId')||undefined,name:values.get('name'),feishuId:values.get('feishuId'),role:values.get('role')}).then(data=>{applyDesktopData(data);return desktopApi.getSettings()}).then(settings=>{state.settings=settings;render();toast('已绑定飞书账号')}).catch(error=>showWorkspaceFormError(event.target,error))}
-  if(event.target.id==='progress-add-form'){event.preventDefault();const values=new FormData(event.target);const text=String(values.get('text')||'').trim();if(!text){event.target.querySelector('input')?.focus();return}const task=tasks.find(item=>item.id===state.task);if(!task)return;(desktopApi?desktopApi.addProgress({taskId:task.id,kind:values.get('kind'),text}):Promise.resolve({id:`demo-${Date.now()}`,kind:values.get('kind'),text,status:'published',author:'local-user',createdAt:new Date().toISOString(),publishedAt:new Date().toISOString()})).then(entry=>{task.progress=[...(task.progress||[]).filter(item=>item.id!==entry.id),entry];render();toast('已记录并同步到空间动态')}).catch(error=>toast(error?.message||'记录失败'))}
+  if(event.target.id==='progress-add-form'){event.preventDefault();const values=new FormData(event.target);const text=String(values.get('text')||'').trim();if(!text){event.target.querySelector('input')?.focus();return}const task=tasks.find(item=>item.id===state.task);if(!task)return;(desktopApi?desktopApi.addProgress({taskId:task.id,kind:values.get('kind'),text}):Promise.resolve({id:`demo-${Date.now()}`,kind:values.get('kind'),text,status:'published',author:'local-user',createdAt:new Date().toISOString(),publishedAt:new Date().toISOString()})).then(entry=>{task.progress=[...(task.progress||[]).filter(item=>item.id!==entry.id),entry];state.progressAddOpen=false;render();toast('已记录并同步到空间动态')}).catch(error=>toast(error?.message||'记录失败'))}
   if(event.target.id==='assign-task-form'){event.preventDefault();const memberId=new FormData(event.target).get('memberId');desktopApi.assignTask({taskId:state.task,memberId}).then(result=>{render();toast(result.status==='sent'?'企微接口已接受指派通知，请确认送达':result.detail||'发送结果未知')}).catch(error=>toast(error?.message||'指派失败'))}
   if(event.target.id==='memory-form'){event.preventDefault();saveMemoryDraft()}
   if(event.target.id==='settings-form'){event.preventDefault();saveSettingsForm(event.target)}

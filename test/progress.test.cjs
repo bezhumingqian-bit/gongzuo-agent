@@ -68,11 +68,12 @@ test('界面：工作页显示进展面板（草稿待确认 / 已发布）；�
   vm.runInContext(require('node:fs').readFileSync(path.join(__dirname, '../demo/app.js'), 'utf8'), context);
   const now = new Date().toISOString();
   vm.runInContext(`state.workspaces=[{id:'t',name:'产品团队',type:'team',members:[]},{id:'p',name:'TEZ 项目',type:'project',createdBy:'local-user',members:[]}];
-tasks=[{id:'w1',title:'福州边缘一区下线',goal:'下线福州一区',workspace:'产品团队',status:'running',updatedAt:'${now}',messages:[{id:'u1',role:'user',text:'下线福州一区'}],progress:[{id:'p1',kind:'output',text:'第 2 批迁移清单 18 台',status:'published',author:'agent',publishedAt:'${now}'},{id:'p2',kind:'blocker',text:'缺 3 台机位信息',status:'draft',author:'agent',createdAt:'${now}'},{id:'p3',kind:'todo',text:'被忽略的不显示',status:'dismissed'}]},
+tasks=[{id:'w1',title:'福州边缘一区下线',goal:'下线福州一区',workspace:'产品团队',status:'running',updatedAt:'${now}',messages:[{id:'u1',role:'user',text:'下线福州一区'},{id:'a1',role:'assistant',text:'已整理',source:'model'},{id:'a2',role:'assistant',text:'第二轮',source:'model'}],progress:[{id:'p1',kind:'output',text:'第 2 批迁移清单 18 台',status:'published',author:'agent',sourceMessageId:'a1',publishedAt:'${now}'},{id:'p2',kind:'blocker',text:'缺 3 台机位信息',status:'draft',author:'agent',sourceMessageId:'a2',createdAt:'${now}'},{id:'p3',kind:'todo',text:'被忽略的不显示',status:'dismissed'}]},
 {id:'w2',title:'沙特机房选址',goal:'选址',workspace:'TEZ 项目',relatedWorkspaces:['产品团队'],status:'running',updatedAt:'${now}',messages:[],progress:[{id:'q1',kind:'blocker',text:'报价未回',status:'published',author:'local-user',publishedAt:'${now}'}]}];
 state.view='task';state.task='w1';render()`, context);
-  assert.match(html, /class="progress-panel[\s\S]*1 条待确认[\s\S]*缺 3 台机位信息[\s\S]*data-action="progress-publish"/);
-  assert.match(html, /第 2 批迁移清单 18 台/);
+  assert.doesNotMatch(html, /class="progress-panel/, '顶部不再有进展面板');
+  assert.match(html, /已同步 1 条进展到空间[\s\S]*第 2 批迁移清单 18 台/, '已确认的那轮收起为一行');
+  assert.match(html, /本轮进展[\s\S]*缺 3 台机位信息[\s\S]*确认同步 1 条[\s\S]*这轮不同步/, '进展附在产生它的回复下面');
   assert.doesNotMatch(html, /被忽略的不显示/);
   vm.runInContext("state.view='workspace';state.workspace='产品团队';state.task=null;render()", context);
   assert.match(html, /空间概况[\s\S]*2 项工作/);
