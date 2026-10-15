@@ -20,15 +20,20 @@ test('提炼：从回复中取出进展块并剥离；支持中英文字段、�
   assert.equal(extractProgress('普通回复<进展>[]</进展>').text, '普通回复');
 });
 
-test('提炼：模型没按 JSON 写时容忍「类型：内容」行；没有进展块时只取明确标注的行和生成文件', () => {
+test('只在阶段完成时出进展：没有进展块的普通回复不产生进展（即使写了「结论：」），只有交付文件算完成；重复的不再出', () => {
+  const { dedupe } = require('../electron/progress-service.cjs');
   assert.deepEqual(extractProgress('x<进展>\n- 决定：越南优先\n- 待办：周五前给报价\n</进展>').items.map(i => [i.kind, i.text]), [['decision', '越南优先'], ['todo', '周五前给报价']]);
-  const items = fallbackProgress('先分析一下。\n**结论**：福州下线可在本周完成\n- 下一步：导出 vstation 清单\n普通的一句话不算', [{ name: '迁移清单.xlsx' }]);
-  assert.deepEqual(items.map(i => [i.kind, i.text]), [['conclusion', '福州下线可在本周完成'], ['todo', '导出 vstation 清单'], ['output', '生成文件：迁移清单.xlsx']]);
-  assert.deepEqual(fallbackProgress('只是普通的一段说明，没有任何标注。'), []);
+  assert.deepEqual(fallbackProgress('先分析一下。\n**结论**：福州下线可能本周完成\n- 下一步：导出清单'), [], '过程中的回复不提炼');
+  assert.deepEqual(fallbackProgress('清单做好了', [{ name: '迁移清单.xlsx' }]).map(i => [i.kind, i.text]), [['output', '生成文件：迁移清单.xlsx']]);
+  assert.deepEqual(dedupe([{ kind: 'decision', text: '越南优先' }, { kind: 'todo', text: '不想同步的' }, { kind: 'output', text: '原文' }, { kind: 'todo', text: '新的' }], [{ text: '越南优先', status: 'published' }, { text: '不想同步的', status: 'dismissed' }, { text: '改过的', originalText: '原文', status: 'published' }]).map(i => i.text), ['新的']);
 });
 
-test('提示词要求 Agent 附进展块', () => {
-  assert.ok(conversationInput([{ role: 'user', text: 'hi' }], {}).instructions.includes(PROGRESS_INSTRUCTION));
+test('提示词：只在阶段完成时附进展块，并总结整段', () => {
+  const instructions = conversationInput([{ role: 'user', text: 'hi' }], {}).instructions;
+  assert.ok(instructions.includes(PROGRESS_INSTRUCTION));
+  assert.match(PROGRESS_INSTRUCTION, /阶段完成时/);
+  assert.match(PROGRESS_INSTRUCTION, /不要附进展块/);
+  assert.match(PROGRESS_INSTRUCTION, /一整段工作的结果/);
 });
 
 test('Agent 回复：正文不含进展块，进展存为草稿；确认、修改、忽略、全部发布、手动记录', async () => {
@@ -55,7 +60,11 @@ test('Agent 回复：正文不含进展块，进展存为草稿；确认、修�
     await assert.rejects(runner.updateProgress(task.id, 'nope', { action: 'publish' }), /不存在/);
     await runner.append(task.id, '再来一轮');
     await runner.queues.get(task.id);
-    assert.equal((await runner.publishAllProgress(task.id)).published, 2);
+    assert.equal((await store.read()).tasks[0].progress.length, 3, '同样的进展不会重复出现');
+    agent.answer = async () => ({ id: 'a3', role: 'assistant', text: '我先分析一下，需要你确认机位口径。', createdAt: new Date().toISOString(), source: 'model' });
+    await runner.append(task.id, '继续');
+    await runner.queues.get(task.id);
+    assert.equal((await store.read()).tasks[0].progress.length, 3, '过程中的回复不产生进展');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
@@ -73,7 +82,7 @@ tasks=[{id:'w1',title:'福州边缘一区下线',goal:'下线福州一区',works
 state.view='task';state.task='w1';render()`, context);
   assert.doesNotMatch(html, /class="progress-panel/, '顶部不再有进展面板');
   assert.match(html, /已同步 1 条进展到空间[\s\S]*第 2 批迁移清单 18 台/, '已确认的那轮收起为一行');
-  assert.match(html, /本轮进展[\s\S]*缺 3 台机位信息[\s\S]*确认同步 1 条[\s\S]*这轮不同步/, '进展附在产生它的回复下面');
+  assert.match(html, /这一段完成了[\s\S]*缺 3 台机位信息[\s\S]*确认同步 1 条[\s\S]*不同步/, '进展附在完成这一段的回复下面');
   assert.doesNotMatch(html, /被忽略的不显示/);
   vm.runInContext("state.view='workspace';state.workspace='产品团队';state.task=null;render()", context);
   assert.match(html, /空间概况[\s\S]*2 项工作/);

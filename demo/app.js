@@ -304,9 +304,9 @@ function replyProgress(t,m){
   const unchecked=state.progressUnchecked||{};
   const editing=state.progressEditing;
   const checkedCount=drafts.filter(item=>!unchecked[item.id]).length;
-  return `<div class="reply-progress" data-reply="${safe(m.id)}"><div class="reply-progress-head"><strong>本轮进展</strong><small>勾选的会同步到空间动态，团队只看到这些</small></div>${drafts.map(item=>editing===item.id
+  return `<div class="reply-progress" data-reply="${safe(m.id)}"><div class="reply-progress-head"><strong>这一段完成了 · Agent 提炼的进展</strong><small>勾选的会同步到空间动态，团队只看到这些</small></div>${drafts.map(item=>editing===item.id
     ?`<form class="reply-progress-row editing" data-progress-form="${safe(item.id)}"><select name="kind" aria-label="类型">${Object.entries(progressKinds).map(([key,label])=>`<option value="${key}" ${key===item.kind?'selected':''}>${label}</option>`).join('')}</select><input name="text" maxlength="120" value="${safe(item.text)}" aria-label="进展内容"><button type="button" data-action="progress-save-draft" data-id="${safe(item.id)}">好</button></form>`
-    :`<label class="reply-progress-row"><input type="checkbox" data-progress-check="${safe(item.id)}" ${unchecked[item.id]?'':'checked'}>${progressTag(item.kind)}<span>${safe(item.text)}</span><button type="button" class="reply-progress-edit" data-action="progress-edit" data-id="${safe(item.id)}">改</button></label>`).join('')}<div class="reply-progress-actions"><button class="dark-button" data-action="progress-confirm" data-id="${safe(m.id)}" ${checkedCount?'':'disabled'}>确认同步 ${checkedCount} 条</button><button data-action="progress-skip" data-id="${safe(m.id)}">这轮不同步</button></div></div>`;
+    :`<label class="reply-progress-row"><input type="checkbox" data-progress-check="${safe(item.id)}" ${unchecked[item.id]?'':'checked'}>${progressTag(item.kind)}<span>${safe(item.text)}</span><button type="button" class="reply-progress-edit" data-action="progress-edit" data-id="${safe(item.id)}">改</button></label>`).join('')}<div class="reply-progress-actions"><button class="dark-button" data-action="progress-confirm" data-id="${safe(m.id)}" ${checkedCount?'':'disabled'}>确认同步 ${checkedCount} 条</button><button data-action="progress-skip" data-id="${safe(m.id)}">不同步</button></div></div>`;
 }
 function spaceWarRoom(name){
   const works=tasks.filter(t=>taskInSpace(t,name)&&!t.channelOnly).sort((a,b)=>Date.parse(b.updatedAt||b.createdAt||0)-Date.parse(a.updatedAt||a.createdAt||0));
@@ -1054,7 +1054,7 @@ root.addEventListener('click',async(event)=>{
         Object.assign(item,entry||{status:change==='publish'?'published':change==='dismiss'?'dismissed':'draft',publishedAt:change==='publish'?new Date().toISOString():null});
       }
       const sent=plan.filter(([,change])=>change==='publish').length;
-      render();toast(action==='progress-reopen'?'已撤回，可重新选择':sent?`已同步 ${sent} 条进展到空间`:'这轮进展不同步');
+      render();toast(action==='progress-reopen'?'已撤回，可重新选择':sent?`已同步 ${sent} 条进展到空间`:'这段进展不同步');
     }catch(error){toast(error?.message||'操作失败')}
   }
   if(action==='toggle-progress-all'){state.progressShowAll=!state.progressShowAll;render()}

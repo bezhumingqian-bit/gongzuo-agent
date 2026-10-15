@@ -1,9 +1,11 @@
 // 进展：what the team sees instead of the full back-and-forth with an Agent.
 //
-// Each Agent reply ends with a small structured block of key progress. 共作
-// strips it from the reply, keeps the items as drafts on the work, and the
-// person who owns the conversation confirms (or edits / dismisses) them with
-// one click. Published items show on the work and in the space feed.
+// Progress is written only when a stage of the work is finished (a conclusion
+// reached, a decision made, a deliverable produced, a blocker that needs
+// someone else). Analysis, clarifying questions and intermediate rounds
+// produce nothing. The Agent decides and summarises the whole stage, not just
+// its last reply. 共作 strips the block from the reply, keeps the items as
+// drafts, and the person confirms them under that reply.
 const crypto = require('node:crypto');
 
 const KINDS = Object.freeze({ conclusion: '结论', decision: '决定', output: '产出', blocker: '卡点', todo: '待办' });
@@ -19,11 +21,14 @@ const MAX_ITEMS = 5;
 const MAX_TEXT = 120;
 
 const PROGRESS_INSTRUCTION = [
-  '回复正文写完后，另起一行附上本轮值得同步给团队的关键进展（只写结果，不写过程、寒暄和重复内容）：',
+  '【团队进展】只有当这项工作的一个阶段完成时，才在回复末尾附上进展块，例如：得出了明确结论、做出了决定、交付了文件或成果、遇到需要别人处理的卡点、明确了谁在什么时候做什么。',
+  '分析中、追问或澄清需求、给出待确认的方案、闲聊、和之前重复的内容，都不算阶段完成，此时不要附进展块。',
+  '附进展块时，总结的是从上一次进展以来这一整段工作的结果（不是只总结这一句回复），1 到 3 条，只写结果、不写过程：',
+  '写事情本身的结果——数字、决定、谁负责什么、什么时候——让没看对话的同事一眼看懂；不要写“已完成回复”“已交付文档”“已整理好”这类描述本次对话的话。',
   '<进展>',
   '[{"类型":"结论|决定|产出|卡点|待办","内容":"一句话，40 字以内"}]',
   '</进展>',
-  '没有值得同步的进展就写 <进展>[]</进展>。这个块会被共作取走，不会展示给提问的人。'
+  '这个块会被共作取走，作为团队可见的进展，不会展示在对话里。'
 ].join('\n');
 
 const BLOCK = /<(进展|progress)>\s*([\s\S]*?)\s*<\/\1>/giu;
@@ -71,22 +76,17 @@ function extractProgress(reply) {
   return { text: text || source.trim(), items: items.slice(0, MAX_ITEMS), found };
 }
 
-// When an Agent did not declare progress, pick out only what is clearly
-// marked; never turn ordinary prose into team updates.
+// When an Agent did not declare progress, the only stage completion 共作 can
+// see for itself is a delivered file. Ordinary replies produce nothing.
 function fallbackProgress(reply, artifacts = []) {
-  const items = [];
-  const lines = String(reply || '').split('\n').map(line => line.trim()).filter(Boolean);
-  for (const line of lines) {
-    const match = line.replace(/^[-*>\s]+/, '').match(/^\**\s*(结论|决定|卡点|风险|阻塞|下一步|待办)\s*\**\s*[：:]\s*\**\s*(.+)$/u);
-    if (match) {
-      const text = clean(match[2].replace(/\*+/g, ''));
-      const kind = kindOf(match[1]);
-      if (text && kind && !items.some(item => item.text === text)) items.push({ kind, text });
-    }
-    if (items.length >= 3) break;
-  }
-  if (artifacts.length) items.push({ kind: 'output', text: clean(`生成文件：${artifacts.map(item => item.name).join('、')}`) });
-  return items.slice(0, MAX_ITEMS);
+  return artifacts.length ? [{ kind: 'output', text: clean(`生成文件：${artifacts.map(item => item.name).join('、')}`) }] : [];
+}
+
+// Drop items the work already has — pending, published (incl. its text before
+// the person edited it) or dismissed (they chose not to share it).
+function dedupe(items, existing = []) {
+  const seen = new Set(existing.flatMap(item => [item.text, item.originalText]).filter(Boolean));
+  return items.filter(item => !seen.has(item.text));
 }
 
 function draft(items, { sourceMessageId, author = 'agent', at = new Date().toISOString() } = {}) {
@@ -104,4 +104,4 @@ function validText(text) {
   return value;
 }
 
-module.exports = { KINDS, PROGRESS_INSTRUCTION, extractProgress, fallbackProgress, draft, validKind, validText, MAX_TEXT };
+module.exports = { KINDS, PROGRESS_INSTRUCTION, extractProgress, fallbackProgress, dedupe, draft, validKind, validText, MAX_TEXT };

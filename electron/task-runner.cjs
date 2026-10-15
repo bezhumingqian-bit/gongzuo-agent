@@ -319,7 +319,11 @@ class TaskRunner {
       const entry = task?.progress?.find(item => item.id === itemId);
       if (!entry) throw new Error('进展不存在');
       const at = new Date().toISOString();
-      if (text != null) entry.text = progress.validText(text);
+      if (text != null) {
+        const next = progress.validText(text);
+        if (next !== entry.text) entry.originalText ||= entry.text;
+        entry.text = next;
+      }
       if (kind != null) entry.kind = progress.validKind(kind);
       if (action === 'publish') Object.assign(entry, { status: 'published', publishedAt: at });
       if (action === 'dismiss') Object.assign(entry, { status: 'dismissed', dismissedAt: at });
@@ -382,7 +386,8 @@ class TaskRunner {
       const extracted = progress.extractProgress(answer.text);
       answer.text = extracted.text;
       const items = extracted.found ? extracted.items : progress.fallbackProgress(extracted.text, answer.artifacts || []);
-      drafts = progress.draft(items, { sourceMessageId: answer.id, author: 'agent' });
+      const existing = (await this.store.read()).tasks.find(item => item.id === taskId)?.progress || [];
+      drafts = progress.draft(progress.dedupe(items, existing), { sourceMessageId: answer.id, author: 'agent' });
     }
     const finished = await this.store.update(draft => {
       const current = draft.tasks.find(item => item.id === taskId);
