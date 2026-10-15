@@ -379,13 +379,17 @@ class TaskRunner {
     delete answer.pendingFilesDirectory;
     try {
       const data = await this.store.read();
-      const space = spaceNamed(data, task.workspace);
+      // The public space holds only rules and templates; results of (legacy)
+      // work started there are kept in the personal space instead.
+      const home = spaceNamed(data, task.workspace);
+      const space = home?.type === 'public' ? spacesOfType(data, 'personal')[0] || null : home;
       if (!space || !files.length || typeof this.documentService?.upload !== 'function') return;
+      answer.artifactsWorkspace = space.name;
       const origin = { taskId: task.id, taskTitle: task.title || task.goal, workspace: task.workspace, agent: answer.source, messageId: answer.id };
       const saved = await this.documentService.upload(space.id, files.slice(0, 10).map(file => file.path), { origin });
       answer.artifacts = saved.map(item => ({ id: item.id, name: item.name }));
     } catch (error) {
-      answer.text = `${answer.text}\n\n（生成的文件未能存入${task.workspace}资料：${String(error?.message || '未知错误').slice(0, 120)}）`;
+      answer.text = `${answer.text}\n\n（生成的文件未能存入资料：${String(error?.message || '未知错误').slice(0, 120)}）`;
     } finally {
       if (directory) await require('node:fs/promises').rm(directory, { recursive: true, force: true }).catch(() => {});
     }
@@ -416,7 +420,7 @@ class TaskRunner {
       return draft;
     });
     this.publish(saved);
-    return { files: carrier.artifacts, skipped: fetched.skipped };
+    return { files: carrier.artifacts, skipped: fetched.skipped, workspace: carrier.artifactsWorkspace };
   }
 
   // Whether an answer in a team/project work drew on the owner's personal

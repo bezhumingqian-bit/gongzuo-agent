@@ -100,6 +100,20 @@ test('成果不再复制：团队工作的文件只存团队资料（带来源�
   } finally { await cleanup(ctx); }
 });
 
+test('公共空间里（旧数据）的工作生成文件时存到个人空间，不进公共资料', async () => {
+  const ctx = await setup();
+  try {
+    const personal = personalWorkspace(await ctx.store.read());
+    await ctx.store.update(draft => { draft.tasks.unshift({ id: 'legacy', title: '在吗', goal: '在吗', workspace: '公共空间', status: 'running', messages: [{ id: 'u', role: 'user', text: '在吗' }] }); return draft; });
+    const answer = { id: 'a', role: 'assistant', text: 'PPT 做好了', source: 'cloudagent', pendingFiles: [{ path: await ctx.produce('示例演示文稿.pptx') }] };
+    await ctx.runner.attachAnswerFiles(await ctx.task('legacy'), answer);
+    const [document] = await ctx.documentService.list();
+    assert.equal(document.workspaceId, personal.id);
+    assert.equal(document.origin.taskId, 'legacy');
+    assert.equal(answer.artifactsWorkspace, personal.name);
+  } finally { await cleanup(ctx); }
+});
+
 test('个人记忆分级：个人工作用全部；团队工作只用标为「可随我带入团队」的；同事触发一条都不用', async () => {
   const ctx = await setup();
   try {
