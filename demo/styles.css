@@ -146,3 +146,6 @@
 .reply-progress-actions .dark-button{background:#252a35;color:#fff}
 .reply-progress-row>span:not(:last-of-type){flex:none}
 .handover-goal{font-size:10px;color:#8b929c;margin:10px 0 0;line-height:1.5}
+.cloud-files-button{margin-top:8px;border:1px solid #dfe3e7;background:#fff;border-radius:7px;padding:4px 9px;font-size:10px;color:#5c6470;display:inline-flex;align-items:center;gap:5px}
+.cloud-files-button .icon{width:11px;height:11px}
+.cloud-files-button:disabled{opacity:.6}

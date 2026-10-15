@@ -238,6 +238,12 @@ function registerIpc() {
     return workOps.handover(actors.local(), taskId, { workspace, messageIds });
   });
 
+  ipcMain.handle('tasks:retrieve-cloud-files', async (event, taskId) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const { task } = await workOps.resolve(actors.local(), assertString(taskId, '任务 ID', 100), 'work.append');
+    return taskRunner.retrieveCloudFiles(task.id);
+  });
+
   ipcMain.handle('tasks:set-conversation-shared', async (event, input = {}) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     return workOps.setConversationShared(actors.local(), assertString(input.taskId, '任务 ID', 100), input.shared === true);

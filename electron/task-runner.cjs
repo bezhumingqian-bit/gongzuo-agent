@@ -391,6 +391,34 @@ class TaskRunner {
     }
   }
 
+  // 「取回云端文件」: bring back deliverables a CloudAgent work left in its
+  // sandbox that 共作 does not have yet; they join the latest cloud reply.
+  async retrieveCloudFiles(taskId) {
+    const data = await this.store.read();
+    const task = data.tasks.find(item => item.id === taskId);
+    if (!task) throw new Error('工作不存在');
+    const reply = [...task.messages].reverse().find(item => item.role === 'assistant' && item.source === 'cloudagent');
+    if (!task.agentSessionId || !reply) throw new Error('这项工作没有 CodeBuddy 云端沙箱');
+    if (typeof this.agent.retrieveCloudFiles !== 'function') throw new Error('当前版本不支持取回云端文件');
+    const runtime = await this.settingsService.getRuntimeConfig();
+    const known = (await this.documentService.list()).filter(item => item.origin?.taskId === task.id && item.status === 'active');
+    const fetched = await this.agent.retrieveCloudFiles(runtime, task.agentSessionId, { exclude: new Set(known.map(item => `${item.name}:${item.size}`)) });
+    if (!fetched.saved.length) {
+      if (fetched.directory) await require('node:fs/promises').rm(fetched.directory, { recursive: true, force: true }).catch(() => {});
+      return { files: [], skipped: fetched.skipped };
+    }
+    const carrier = { id: reply.id, source: 'cloudagent', text: '', pendingFiles: fetched.saved, pendingFilesDirectory: fetched.directory };
+    await this.attachAnswerFiles(task, carrier);
+    if (!carrier.artifacts?.length) throw new Error(carrier.text.trim().replace(/^（|）$/g, '') || '文件未能存入资料');
+    const saved = await this.store.update(draft => {
+      const message = draft.tasks.find(item => item.id === taskId)?.messages.find(item => item.id === reply.id);
+      if (message) message.artifacts = [...(message.artifacts || []), ...carrier.artifacts];
+      return draft;
+    });
+    this.publish(saved);
+    return { files: carrier.artifacts, skipped: fetched.skipped };
+  }
+
   // Whether an answer in a team/project work drew on the owner's personal
   // memory or materials; its progress drafts are then flagged for review.
   async personalContextOf(taskId, triggerId) {

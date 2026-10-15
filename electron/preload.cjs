@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('gongzuo', Object.freeze({
   setTaskAgent: input => ipcRenderer.invoke('tasks:set-agent', input),
   setRelatedSpaces: input => ipcRenderer.invoke('tasks:set-related-spaces', input),
   handoverTask: input => ipcRenderer.invoke('tasks:handover', input),
+  retrieveCloudFiles: taskId => ipcRenderer.invoke('tasks:retrieve-cloud-files', taskId),
   setConversationShared: input => ipcRenderer.invoke('tasks:set-conversation-shared', input),
   setPrivacy: input => ipcRenderer.invoke('settings:set-privacy', input),
   updateProgress: input => ipcRenderer.invoke('progress:update', input),

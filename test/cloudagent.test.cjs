@@ -1,18 +1,18 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { callCloudAgent, checkCloudAgent, parseLossless, permissionReply, spaceKey, workKey, spaceManifest } = require('../electron/cloudagent.cjs');
+const { callCloudAgent, checkCloudAgent, parseLossless, permissionReply, spaceKey, workKey, spaceManifest, retrieveCloudArtifacts, finalReply } = require('../electron/cloudagent.cjs');
 const { AgentService, cloudSessionFor, sessionOwner } = require('../electron/agent-service.cjs');
 
 const BIG = '2110293515846402048';
 
 // In-memory AgentOS: control plane + ACP (GET SSE, POST 202 / SSE for prompt).
-function fakeAgentOS({ history = [] } = {}) {
-  const state = { runtimes: [], created: [], prompts: [], loads: [], news: [], permissionAnswers: [], headers: [] };
+function fakeAgentOS({ history = [], files = null, writes = [], chunks = null } = {}) {
+  const state = { runtimes: [], created: [], prompts: [], loads: [], news: [], permissionAnswers: [], headers: [], files, fileHeaders: [] };
   let sse = null;
   const encoder = new TextEncoder();
   const push = message => sse?.enqueue(encoder.encode(`id: 1\nevent: message\ndata: ${JSON.stringify(message)}\n\n`));
   const json = (status, text) => new Response(text, { status, headers: { 'content-type': 'application/json' } });
-  const runtimeJson = runtime => `{"id":${runtime.id},"runtimeName":"${runtime.name}","status":"${runtime.status}","metadata":${JSON.stringify(runtime.metadata)},"links":{"acpLink":{"url":"https://sandbox.test/acp","token":"tok","tokenExpiresAt":1}}}`;
+  const runtimeJson = runtime => `{"id":${runtime.id},"runtimeName":"${runtime.name}","status":"${runtime.status}","metadata":${JSON.stringify(runtime.metadata)},"links":{"acpLink":{"url":"https://sandbox.test/acp","token":"tok","tokenExpiresAt":1}${files ? ',"sandboxLink":{"dataPlaneEndpoint":"https://49983-box.test"}' : ''}}}`;
   const fetchImpl = async (url, options = {}) => {
     const target = new URL(url);
     if (target.host === 'www.codebuddy.cn') {
@@ -40,6 +40,18 @@ function fakeAgentOS({ history = [] } = {}) {
       }
       return json(404, '{}');
     }
+    if (target.host === '49983-box.test') {
+      state.fileHeaders.push(options.headers);
+      if (options.headers['x-access-token'] !== 'tok') return new Response('<html>', { status: 401 });
+      if (target.pathname === '/filesystem.Filesystem/ListDir') {
+        return json(200, JSON.stringify({ entries: Object.entries(state.files).map(([name, file]) => ({ name, type: 'FILE_TYPE_FILE', path: `/workspace/artifacts/${name}`, size: String(file.body.length), modifiedTime: file.at })) }));
+      }
+      if (target.pathname === '/files') {
+        const file = state.files[target.searchParams.get('path').replace('/workspace/artifacts/', '')];
+        return file ? new Response(file.body, { status: 200 }) : new Response('', { status: 404 });
+      }
+      return json(404, '{}');
+    }
     if (target.host === 'sandbox.test') {
       if (options.method === 'GET') {
         const body = new ReadableStream({ start(controller) { sse = controller; controller.enqueue(encoder.encode(': padding\n\n')); } });
@@ -52,6 +64,12 @@ function fakeAgentOS({ history = [] } = {}) {
         state.prompts.push(message.params);
         const stream = new ReadableStream({
           start(controller) {
+            if (state.prompts.length === 1) for (const [name, body] of writes) state.files[name] = { body, at: `2026-10-15T08:0${Object.keys(state.files).length}:00Z` };
+            if (chunks) {
+              for (const chunk of chunks) push({ jsonrpc: '2.0', method: 'session/update', params: { update: chunk === 'TOOL' ? { sessionUpdate: 'tool_call', title: 'python make.py', kind: 'edit' } : { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } } } });
+              setTimeout(() => { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } })}\n\n`)); controller.close(); }, 20);
+              return;
+            }
             push({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call', title: 'ls /workspace', kind: 'execute' } } });
             push({ jsonrpc: '2.0', id: 'perm-1', method: 'session/request_permission', params: { toolCall: { kind: 'execute', title: 'rm -rf build' }, options: [{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }] } });
             push({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '已完成：' } } } });
@@ -178,4 +196,32 @@ test('多人：沙箱归属按 Key ID 记录（不含密钥）；同事追问别
   agent.cloudAgentImpl = async () => ({ text: 'ok', sessionId: 'r2:s2' });
   const answer = await agent.answer({ id: 'w', messages: [{ role: 'user', text: 'hi' }], workspace: '产品团队', ...task }, theirs);
   assert.equal(answer.agentSessionOwner, 'ck_you456');
+});
+
+test('成果文件：本轮新生成的才取回（旧文件、不支持的格式不取），回复只留最后一步之后的结论', async () => {
+  const { state, fetchImpl } = fakeAgentOS({
+    files: { '旧方案.md': { body: 'old', at: '2026-10-14T01:00:00Z' } },
+    writes: [['示例演示文稿.pptx', 'PPTX-BYTES'], ['render.png', 'PNG']],
+    chunks: ['Content looks complete.', 'TOOL', 'Now convert to images for visual QA.', 'TOOL', '已经做好示例 PPT《示例演示文稿.pptx》，共 5 页，已完成视觉检查。']
+  });
+  const result = await callCloudAgent(config, [{ role: 'user', text: '做个 PPT' }], '产品团队', {}, { fetchImpl, workId: 'w-ppt' });
+  assert.equal(result.text.split('\n\n')[0], '已经做好示例 PPT《示例演示文稿.pptx》，共 5 页，已完成视觉检查。', '过程旁白不进回复');
+  assert.deepEqual(result.files.map(file => file.name), ['示例演示文稿.pptx']);
+  assert.equal(require('node:fs').readFileSync(result.files[0].path, 'utf8'), 'PPTX-BYTES');
+  assert.match(result.text, /render\.png（格式不支持存入资料）/);
+  assert.ok(state.fileHeaders.every(headers => headers['x-access-token'] === 'tok'), '文件接口用 ACP 令牌');
+  const service = new AgentService(fetchImpl);
+  const answer = await service.answer({ id: 'w-ppt', messages: [{ role: 'user', text: '再做一个' }], workspace: '产品团队', agentSessionId: result.sessionId }, { ...config, agent: { mode: 'cloudagent' } }, {});
+  assert.equal(answer.pendingFiles, undefined, '下一轮没有新文件就不再取回');
+  require('node:fs').rmSync(result.filesDirectory, { recursive: true, force: true });
+});
+
+test('取回云端文件：列出沙箱成果，跳过已取回的（按文件名和大小）', async () => {
+  const { fetchImpl } = fakeAgentOS({ files: { 'a.pptx': { body: 'AAAA', at: '2026-10-15T08:00:00Z' }, 'b.md': { body: 'B', at: '2026-10-15T08:01:00Z' } } });
+  const first = await callCloudAgent(config, [{ role: 'user', text: '建沙箱' }], '产品团队', {}, { fetchImpl, workId: 'w-r' });
+  const fetched = await retrieveCloudArtifacts(config, first.sessionId, { fetchImpl, exclude: new Set(['b.md:1']) });
+  assert.deepEqual(fetched.saved.map(file => file.name), ['a.pptx']);
+  require('node:fs').rmSync(fetched.directory, { recursive: true, force: true });
+  await assert.rejects(retrieveCloudArtifacts(config, '', { fetchImpl }), /还没有 CodeBuddy 云端沙箱/);
+  assert.equal(finalReply(['先说一句结论，后面还有很多字的说明', '好']), '先说一句结论，后面还有很多字的说明\n\n好', '最后一段太短时保留全文');
 });

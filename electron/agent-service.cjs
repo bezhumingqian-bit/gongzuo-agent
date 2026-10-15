@@ -3,7 +3,7 @@ const { callModel, callExternalAgent } = require('./connection-service.cjs');
 const { callCodeBuddy } = require('./codebuddy-service.cjs');
 const { callWorkBuddy } = require('./workbuddy-service.cjs');
 const { callWorkBuddyCloud } = require('./workbuddy-cloud.cjs');
-const { callCloudAgent } = require('./cloudagent.cjs');
+const { callCloudAgent, retrieveCloudArtifacts } = require('./cloudagent.cjs');
 const { workbuddyTransport, transportOf } = require('./workbuddy-transport.cjs');
 
 // Who a cloud session belongs to: the WorkBuddy open_id, or the CodeBuddy API
@@ -121,6 +121,11 @@ class AgentService {
     } catch (error) {
       return { id: crypto.randomUUID(), role: 'assistant', text: `连接失败：${error.message}`, createdAt: new Date().toISOString(), source: 'connection-error' };
     }
+  }
+
+  // Files a CloudAgent work left in its sandbox (/workspace/artifacts).
+  retrieveCloudFiles(config, sessionId, options = {}) {
+    return (this.retrieveCloudImpl || retrieveCloudArtifacts)(config, sessionId, { fetchImpl: this.fetchImpl, ...options });
   }
 
   async createTask(input, config) {

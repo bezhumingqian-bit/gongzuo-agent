@@ -54,7 +54,8 @@
 - `session/load` 会先回放历史 `session/update`，只收集 `session/prompt` 之后的输出（同时修复了 WorkBuddy 云端任务的同类问题）。
 - 新会话设 `acceptEdits`；权限请求中读/搜/改允许，执行、删除等拒绝并写进回复。**实测该沙箱执行只读终端命令（`ls`）未发起权限请求**，平台侧对命令的确认策略以实际为准，不能把「拒绝执行」当作强保证。
 - 真实联调：建沙箱 → 对话 19.5 s；同会话追问 6.3 s 且记得上一问；经 TaskRunner 完整链路执行「建文件并读回」15.4 s，进度显示 Write/Read，团队记忆「结论先行」生效。测试 118/118。
-- 未做：成果文件回传（E2B 文件接口）、空间资料同步进沙箱、共作内审批、沙箱回收策略（工作归档时删除 Runtime）。
+- 成果文件回传（2026-10-15）：沙箱数据面 `links.sandboxLink.dataPlaneEndpoint`（E2B envd），用 **ACP 令牌放在 `X-Access-Token` 头** 鉴权（Bearer、x-api-key 均 401）。`POST /filesystem.Filesystem/ListDir {path:"/workspace/artifacts",depth:1}` 列目录，`GET /files?path=…&username=user` 下载。每轮开始前记下已有文件（名+大小+修改时间），结束后只取回新增或改动的，支持 PDF/Word/Excel/PPT/MD/TXT/CSV，单个 ≤25 MB、每轮 ≤10 个，存入工作所在空间资料；旧工作可在最新一条云端回复下点「取回云端文件」补取（按名+大小去重）。回复正文只保留最后一次工具调用之后的结论，过程旁白不再混入。
+- 未做：空间资料同步进沙箱、共作内审批、沙箱回收策略（工作归档时删除 Runtime）。
 
 ## 多人接入（同事怎么用）
 
