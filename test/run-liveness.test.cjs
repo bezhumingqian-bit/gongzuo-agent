@@ -52,6 +52,7 @@ test('运行中记录开始时间、最近动作、步数与重连阶段；回�
     assert.ok(Date.now() - Date.parse(run.lastActivityAt) >= 5000, '最近动作时间来自 Agent');
     run = await until(runOf, item => item.phase === 'reconnecting');
     assert.equal(run.phase, 'reconnecting');
+    assert.ok(Date.now() - Date.parse(run.lastActivityAt) >= 5000, '重连不伪造新动作');
     assert.equal(run.attempt, 2);
     assert.equal(run.progress, '写到第 6 页');
     release();
@@ -60,6 +61,53 @@ test('运行中记录开始时间、最近动作、步数与重连阶段；回�
     run = (await store.read()).tasks[0].agentRun;
     assert.equal(run.status, 'done', '回复后的迟到进度不覆盖完成状态');
   } finally { release(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('首轮发送前持久化云端 session，连接报告不伪造动作；上限超时标失败而不是完成', async () => {
+  let storeRef;
+  const agent = {
+    isConfigured: () => true,
+    answer: async (task, config, memory, { onProgress }) => {
+      await onProgress({ sessionId: 'runtime:session', phase: 'working' });
+      const saved = (await storeRef.read()).tasks.find(item => item.id === task.id);
+      assert.equal(saved.agentSessionId, 'runtime:session');
+      assert.equal(saved.agentRun.lastActivityAt, undefined);
+      assert.ok(Date.parse(saved.agentRun.startedAt));
+      return { id: 'timeout-result', role: 'assistant', text: '部分成果<进展>[{"kind":"output","text":"不应发布"}]</进展>', source: 'cloudagent', stopReason: 'timeout', createdAt: new Date().toISOString() };
+    }
+  };
+  const { directory, store, runner } = await setup(agent, 'cloudagent'); storeRef = store;
+  try {
+    const task = await runner.create('长任务', '产品团队');
+    await runner.queues.get(task.id);
+    const saved = (await store.read()).tasks[0];
+    assert.equal(saved.agentRun.status, 'failed');
+    assert.equal(saved.messages.at(-1).stopReason, 'timeout');
+    assert.equal(saved.progress?.length || 0, 0);
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('执行步骤最后一次立即落盘并绑定到本轮回复，下一轮不覆盖历史', async () => {
+  let serial = 0;
+  const agent = { isConfigured: () => true, answer: async (task, config, memory, { onProgress }) => {
+    serial++;
+    onProgress({ execution: [{ id: `tool-${serial}`, title: '运行沙箱命令', kind: 'execute', status: 'completed', startedAt: Date.now() - 100, endedAt: Date.now() }], steps: 1 });
+    return { id: `answer-${serial}`, role: 'assistant', text: '已完成', source: 'cloudagent', createdAt: new Date().toISOString() };
+  } };
+  const { directory, store, runner } = await setup(agent, 'cloudagent');
+  try {
+    const task = await runner.create('测试两轮', '产品团队');
+    await runner.queues.get(task.id);
+    await runner.append(task.id, '第二轮');
+    await runner.queues.get(task.id);
+    const saved = (await store.read()).tasks[0];
+    const replies = saved.messages.filter(item => item.role === 'assistant');
+    assert.equal(replies[0].execution.entries[0].id, 'tool-1');
+    assert.equal(replies[1].execution.entries[0].id, 'tool-2');
+    assert.equal(saved.agentRun.execution[0].id, 'tool-2');
+    assert.ok(Date.parse(replies[1].execution.endedAt) >= Date.parse(replies[1].execution.startedAt));
+    assert.equal(saved.progress?.length || 0, 0, '工具步骤不是团队进展');
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
 test('应用重启：运行中的 CloudAgent 工作自动续接，其他 Agent 只标记中断', async () => {

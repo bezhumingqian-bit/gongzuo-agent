@@ -55,7 +55,12 @@ async function setup({ privacy, mode = 'codex' } = {}) {
   return { directory, store, runner, ops, documentService, produce, seen, settle, task, setReply: text => { reply = text; } };
 }
 
-const cleanup = ctx => fs.rm(ctx.directory, { recursive: true, force: true });
+const cleanup = async ctx => {
+  // create() schedules an Agent turn. Drain it before removing only this test's
+  // mkdtemp directory; otherwise a late write can race rmdir (ENOTEMPTY).
+  while (ctx.runner.queues.size) await Promise.all([...ctx.runner.queues.values()]);
+  await fs.rm(ctx.directory, { recursive: true, force: true });
+};
 
 test('个人空间：首次启动与老数据都有且只有一个，排在最前；同名时改名不覆盖', () => {
   const seed = createSeed();

@@ -6,7 +6,7 @@ const { AgentService, cloudSessionFor, sessionOwner } = require('../electron/age
 const BIG = '2110293515846402048';
 
 // In-memory AgentOS: control plane + ACP (GET SSE, POST 202 / SSE for prompt).
-function fakeAgentOS({ history = [], files = null, writes = [], chunks = null } = {}) {
+function fakeAgentOS({ history = [], files = null, writes = [], chunks = null, newLoadMissing = false } = {}) {
   const state = { runtimes: [], created: [], prompts: [], loads: [], news: [], permissionAnswers: [], headers: [], files, fileHeaders: [] };
   let sse = null;
   const encoder = new TextEncoder();
@@ -66,14 +66,14 @@ function fakeAgentOS({ history = [], files = null, writes = [], chunks = null } 
           start(controller) {
             if (state.prompts.length === 1) for (const [name, body] of writes) state.files[name] = { body, at: `2026-10-15T08:0${Object.keys(state.files).length}:00Z` };
             if (chunks) {
-              for (const chunk of chunks) push({ jsonrpc: '2.0', method: 'session/update', params: { update: chunk === 'TOOL' ? { sessionUpdate: 'tool_call', title: 'python make.py', kind: 'edit' } : { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } } } });
+              for (const chunk of chunks) push({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'sess-1', update: chunk === 'TOOL' ? { sessionUpdate: 'tool_call', title: 'python make.py', kind: 'edit' } : { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } } } });
               setTimeout(() => { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } })}\n\n`)); controller.close(); }, 20);
               return;
             }
-            push({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call', title: 'ls /workspace', kind: 'execute' } } });
+            push({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'sess-1', update: { sessionUpdate: 'tool_call', title: 'ls /workspace', kind: 'execute' } } });
             push({ jsonrpc: '2.0', id: 'perm-1', method: 'session/request_permission', params: { toolCall: { kind: 'execute', title: 'rm -rf build' }, options: [{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }] } });
-            push({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '已完成：' } } } });
-            push({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '沙箱为空。' } } } });
+            push({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'sess-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '已完成：' } } } });
+            push({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'sess-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '沙箱为空。' } } } });
             setTimeout(() => { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } })}\n\n`)); controller.close(); }, 20);
           }
         });
@@ -85,8 +85,9 @@ function fakeAgentOS({ history = [], files = null, writes = [], chunks = null } 
         if (message.method === 'session/set_mode') push({ jsonrpc: '2.0', id: message.id, result: {} });
         if (message.method === 'session/load') {
           state.loads.push(message.params);
-          for (const text of history) push({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } });
-          push(message.params.sessionId === 'sess-1' ? { jsonrpc: '2.0', id: message.id, result: {} } : { jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'no session' } });
+          for (const text of history) push({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'sess-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } });
+          const exists = state.news.length > 0 && message.params.sessionId === 'sess-1' && !(newLoadMissing && state.loads.length === 1);
+          push(exists ? { jsonrpc: '2.0', id: message.id, result: {} } : { jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'no session' } });
         }
       }, 5);
       return new Response('', { status: 202 });
@@ -120,7 +121,7 @@ test('首次执行：为这项工作建沙箱并等就绪，新建会话，流�
   assert.match(result.text, /^已完成：沙箱为空。/);
   assert.match(result.text, /已拒绝：rm -rf build/);
   assert.deepEqual(state.permissionAnswers[0].result, { outcome: { outcome: 'selected', optionId: 'r' } });
-  assert.ok(progress.some(p => p.step === '运行命令 ls /workspace'), '步骤用人话显示');
+  assert.ok(progress.some(p => p.step === '运行沙箱命令'), '步骤用人话显示');
   assert.ok(progress.every(p => p.startedAt > 0), '进度带开始时间');
   assert.ok(progress.some(p => p.lastActivityAt > 0), '进度带最近动作时间');
   assert.ok(!state.prompts[0].prompt[0].text.includes('【共作消息'), '没有消息 id 时不加编号');
@@ -132,7 +133,7 @@ test('追问：复用这项工作的沙箱与会话，只发最后一条；加�
   const first = await callCloudAgent(config, [{ role: 'user', text: '第一问' }], '产品团队', {}, { fetchImpl, workId: 'w1' });
   const second = await callCloudAgent(config, [{ role: 'user', text: '第一问' }, { role: 'assistant', text: first.text }, { role: 'user', text: '第二问' }], '产品团队', {}, { fetchImpl, workId: 'w1', sessionId: first.sessionId });
   assert.equal(state.created.length, 1, '同一工作不重复建沙箱');
-  assert.deepEqual(state.loads.map(item => item.sessionId), ['sess-1']);
+  assert.deepEqual(state.loads.map(item => item.sessionId), ['sess-1', 'sess-1']);
   assert.equal(second.sessionId, first.sessionId);
   assert.ok(!second.text.includes('上一轮的旧回复'));
   assert.ok(!state.prompts[1].prompt[0].text.includes('第一问'), '续接只发新消息');
@@ -154,13 +155,40 @@ test('不同工作各自建沙箱、对话不串；丢了会话 ID 能按工作�
   assert.equal(spaceManifest('运营团队', 'k').id, `gongzuo-${spaceKey('运营团队')}`);
 });
 
-test('权限策略：读写类允许，其余拒绝', () => {
+test('权限策略：读写类允许，其余拒绝', async () => {
   const declined = [];
   const options = [{ optionId: 'ok', kind: 'allow_once' }, { optionId: 'no', kind: 'reject_once' }];
-  assert.deepEqual(permissionReply({ params: { toolCall: { kind: 'edit', title: '改 README' }, options } }, declined), { outcome: { outcome: 'selected', optionId: 'ok' } });
-  assert.deepEqual(permissionReply({ params: { toolCall: { kind: 'delete', title: '删除' }, options } }, declined), { outcome: { outcome: 'selected', optionId: 'no' } });
-  assert.deepEqual(permissionReply({ params: { toolCall: { kind: 'execute' } } }, declined), { outcome: { outcome: 'cancelled' } });
+  assert.deepEqual(await permissionReply({ params: { toolCall: { kind: 'edit', title: '改 README' }, options } }, declined), { outcome: { outcome: 'selected', optionId: 'ok' } });
+  assert.deepEqual(await permissionReply({ params: { toolCall: { kind: 'delete', title: '删除' }, options } }, declined), { outcome: { outcome: 'selected', optionId: 'no' } });
+  assert.deepEqual(await permissionReply({ params: { toolCall: { kind: 'execute' } } }, declined), { outcome: { outcome: 'cancelled' } });
   assert.deepEqual(declined, ['删除', 'execute']);
+});
+
+test('权限策略：需确认的操作交给共作审批，允许/拒绝/超时分别处理', async () => {
+  const options = [{ optionId: 'ok', kind: 'allow_once' }, { optionId: 'no', kind: 'reject_once' }];
+  const asked = [];
+  const declined = [];
+  const approved = [];
+  const decide = outcome => request => { asked.push(request); return outcome; };
+  assert.deepEqual(await permissionReply({ params: { toolCall: { kind: 'execute', title: 'npm test' }, options } }, declined, decide({ outcome: 'allow', reason: 'user' }), approved), { outcome: { outcome: 'selected', optionId: 'ok' } });
+  assert.deepEqual(await permissionReply({ params: { toolCall: { kind: 'delete', title: '删除 build' }, options } }, declined, decide({ outcome: 'reject', reason: 'timeout' }), approved), { outcome: { outcome: 'selected', optionId: 'no' } });
+  assert.deepEqual(await permissionReply({ params: { toolCall: { kind: 'read', title: '读 README' }, options } }, declined, decide({ outcome: 'reject' }), approved), { outcome: { outcome: 'selected', optionId: 'ok' } });
+  assert.equal(asked.length, 2, '读类操作不打扰用户');
+  assert.equal(asked[0].title, '运行沙箱命令：npm test');
+  assert.deepEqual(approved, ['npm test']);
+  assert.deepEqual(declined, [{ title: '删除 build', reason: 'timeout' }]);
+});
+
+test('一次性审批没有 allow_once 时拒绝，绝不回退到永久授权', async () => {
+  for (const kind of ['execute', 'delete', 'read', 'edit']) {
+    const declined = [], approved = [];
+    let asked = 0;
+    const reply = await permissionReply({ params: { toolCall: { kind, title: 'scope check' }, options: [{ optionId: 'forever', kind: 'allow_always' }, { optionId: 'reject', kind: 'reject_once' }] } }, declined, async () => { asked++; return { outcome: 'allow' }; }, approved);
+    assert.deepEqual(reply, { outcome: { outcome: 'selected', optionId: 'reject' } });
+    assert.equal(asked, 0);
+    assert.deepEqual(approved, []);
+  }
+  assert.deepEqual(await permissionReply({ params: { toolCall: { kind: 'execute' }, options: [{ optionId: 'allow-once', kind: 'unknown_allow' }] } }, [], async () => ({ outcome: 'allow' })), { outcome: { outcome: 'cancelled' } });
 });
 
 test('连接测试与错误 Key', async () => {
@@ -181,7 +209,7 @@ test('Agent 服务：CloudAgent 需要 Key，回复标记来源并续接会话',
   assert.equal(seen.workId, undefined, '测试任务没有 id');
   assert.equal(answer.source, 'cloudagent');
   assert.equal(answer.agentSessionId, 'r:s');
-  assert.equal(agent.getStatus({ agent: { mode: 'cloudagent' }, cloudagentKeychain: true }).label, 'CodeBuddy 云端');
+  assert.equal(agent.getStatus({ agent: { mode: 'cloudagent' }, cloudagentKeychain: true }).label, '共作 Agent · 云端执行');
 });
 
 test('多人：沙箱归属按 Key ID 记录（不含密钥）；同事追问别人的工作时新建自己的沙箱', async () => {
@@ -206,9 +234,9 @@ test('成果文件：本轮新生成的才取回（旧文件、不支持的格�
   });
   const result = await callCloudAgent(config, [{ role: 'user', text: '做个 PPT' }], '产品团队', {}, { fetchImpl, workId: 'w-ppt' });
   assert.equal(result.text.split('\n\n')[0], '已经做好示例 PPT《示例演示文稿.pptx》，共 5 页，已完成视觉检查。', '过程旁白不进回复');
-  assert.deepEqual(result.files.map(file => file.name), ['示例演示文稿.pptx']);
+  assert.deepEqual(result.files.map(file => file.name), ['示例演示文稿.pptx', 'render.png']);
   assert.equal(require('node:fs').readFileSync(result.files[0].path, 'utf8'), 'PPTX-BYTES');
-  assert.match(result.text, /render\.png（格式不支持存入资料）/);
+  assert.doesNotMatch(result.text, /render\.png（格式不支持存入资料）/);
   assert.ok(state.fileHeaders.every(headers => headers['x-access-token'] === 'tok'), '文件接口用 ACP 令牌');
   const service = new AgentService(fetchImpl);
   const answer = await service.answer({ id: 'w-ppt', messages: [{ role: 'user', text: '再做一个' }], workspace: '产品团队', agentSessionId: result.sessionId }, { ...config, agent: { mode: 'cloudagent' } }, {});
@@ -224,4 +252,18 @@ test('取回云端文件：列出沙箱成果，跳过已取回的（按文件�
   require('node:fs').rmSync(fetched.directory, { recursive: true, force: true });
   await assert.rejects(retrieveCloudArtifacts(config, '', { fetchImpl }), /还没有 CodeBuddy 云端沙箱/);
   assert.equal(finalReply(['先说一句结论，后面还有很多字的说明', '好']), '先说一句结论，后面还有很多字的说明\n\n好', '最后一段太短时保留全文');
+});
+
+test('首次旧桩在 new 后首次 load 返回 no session 仍兼容执行，并提前报告会话 ID', async () => {
+  const { state, fetchImpl } = fakeAgentOS({ newLoadMissing: true });
+  const progress = [];
+  const result = await callCloudAgent(config, [{ id: 'first-new', role: 'user', text: '第一次执行' }], '产品团队', {}, {
+    fetchImpl, workId: 'w-first-load', onProgress: p => progress.push(p)
+  });
+  assert.equal(state.loads.length, 1);
+  assert.equal(state.news.length, 1);
+  assert.equal(state.prompts.length, 1);
+  assert.ok(progress.some(p => p.sessionId === `${BIG}:sess-1` && p.phase === 'working' && !p.lastActivityAt));
+  assert.match(state.prompts[0].prompt[0].text, /当前工作空间[\s\S]*第一次执行/);
+  assert.equal(result.stopReason, 'end_turn');
 });

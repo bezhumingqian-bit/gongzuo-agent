@@ -18,3 +18,14 @@ stable-build/
 *.app/
 *.log
 .DS_Store
+
+# Local assistant state, backups and installation artifacts are never source.
+.workbuddy/
+outputs/
+*.zip
+*.dmg
+server/workbuddy-relay-data.json
+server/workbuddy-relay-data.json.*
+server/workbuddy-relay-data.json-*
+# One-off source migration, not a runtime or supported maintenance tool.
+scripts/patch-relay-ui.cjs

@@ -91,7 +91,7 @@ test('输入框只交给 Agent；@ 同事入口在两处输入框都有，不再
   assert.doesNotMatch(html, /open-wecom-composer/);
   assert.match(html, /data-action="submit"[^>]*aria-label="交给 Agent"/);
   assert.match(html, /data-action="toggle-mentions" data-input="home-input"/);
-  vm.runInContext("state.view='task';state.task='feedback';render()", context);
+  vm.runInContext("tasks=[{id:'real',title:'整理方案',goal:'整理方案',workspace:'产品团队',messages:[{id:'u',role:'user',text:'整理方案'}]}];state.view='task';state.task='real';render()", context);
   assert.match(html, /data-action="toggle-mentions" data-input="thread-input"/);
   assert.doesNotMatch(html, /open-wecom-composer/);
   vm.runInContext("tasks=[{id:'channel',title:'企微消息',goal:'同一条通知',workspace:'产品团队',messages:[{id:'one',role:'user',text:'同一条通知',wecomOutbound:true},{id:'two',role:'user',text:'同一条通知',wecomOutbound:true}]}];state.task='channel';render()", context);

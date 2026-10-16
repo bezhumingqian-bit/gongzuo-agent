@@ -1,4 +1,4 @@
-function createSeed() {
+function createDemoSeed() {
   return {
     schemaVersion: 1,
     activeWorkspace: '产品团队',
@@ -57,4 +57,8 @@ function createSeed() {
   };
 }
 
-module.exports = { createSeed };
+function createSeed() {
+  return { ...createDemoSeed(), tasks: [], apps: [] };
+}
+
+module.exports = { createSeed, createDemoSeed };

@@ -76,21 +76,22 @@ test('界面：进展附在 Agent 回复下就地确认，顶部不再有面板�
   vm.createContext(context);
   vm.runInContext(require('node:fs').readFileSync(path.join(__dirname, '../demo/app.js'), 'utf8'), context);
   const now = new Date().toISOString();
-  vm.runInContext(`state.workspaces=[{id:'t',name:'产品团队',type:'team',members:[]},{id:'p',name:'TEZ 项目',type:'project',createdBy:'local-user',members:[]}];
-tasks=[{id:'w1',title:'福州边缘一区下线',goal:'下线福州一区',workspace:'产品团队',status:'running',updatedAt:'${now}',messages:[{id:'u1',role:'user',text:'下线福州一区'},{id:'a1',role:'assistant',text:'已整理',source:'model'},{id:'a2',role:'assistant',text:'第二轮',source:'model'}],progress:[{id:'p1',kind:'output',text:'第 2 批迁移清单 18 台',status:'published',author:'agent',sourceMessageId:'a1',publishedAt:'${now}'},{id:'p2',kind:'blocker',text:'缺 3 台机位信息',status:'draft',author:'agent',sourceMessageId:'a2',createdAt:'${now}'},{id:'p3',kind:'todo',text:'被忽略的不显示',status:'dismissed'}]},
-{id:'w2',title:'沙特机房选址',goal:'选址',workspace:'TEZ 项目',relatedWorkspaces:['产品团队'],status:'running',updatedAt:'${now}',messages:[],progress:[{id:'q1',kind:'blocker',text:'报价未回',status:'published',author:'local-user',publishedAt:'${now}'}]}];
+  vm.runInContext(`state.workspaces=[{id:'t',name:'产品团队',type:'team',members:[]},{id:'p',name:'示例项目',type:'project',createdBy:'local-user',members:[]}];
+tasks=[{id:'w1',title:'示例节点下线',goal:'下线示例节点',workspace:'产品团队',status:'running',updatedAt:'${now}',messages:[{id:'u1',role:'user',text:'下线示例节点'},{id:'a1',role:'assistant',text:'已整理',source:'model'},{id:'a2',role:'assistant',text:'第二轮',source:'model'}],progress:[{id:'p1',kind:'output',text:'第 2 批迁移清单 18 台',status:'published',author:'agent',sourceMessageId:'a1',publishedAt:'${now}'},{id:'p2',kind:'blocker',text:'缺 3 台机位信息',status:'draft',author:'agent',sourceMessageId:'a2',createdAt:'${now}'},{id:'p3',kind:'todo',text:'被忽略的不显示',status:'dismissed'}]},
+{id:'w2',title:'示例机房选址',goal:'选址',workspace:'示例项目',relatedWorkspaces:['产品团队'],status:'running',updatedAt:'${now}',messages:[],progress:[{id:'q1',kind:'blocker',text:'报价未回',status:'published',author:'local-user',publishedAt:'${now}'}]}];
 state.view='task';state.task='w1';render()`, context);
   assert.doesNotMatch(html, /class="progress-panel/, '顶部不再有进展面板');
   assert.match(html, /已同步 1 条进展到空间[\s\S]*第 2 批迁移清单 18 台/, '已确认的那轮收起为一行');
-  assert.match(html, /这一段完成了[\s\S]*缺 3 台机位信息[\s\S]*确认同步 0 条[\s\S]*不同步/, '进展附在完成这一段的回复下面，默认不勾选');
+  assert.match(html, /待确认进展[\s\S]*缺 3 台机位信息[\s\S]*确认同步 0 条[\s\S]*不同步/, '进展附在完成这一段的回复下面，默认不勾选');
   vm.runInContext("state.progressChecked=Object.fromEntries(tasks[0].progress.filter(item=>item.status==='draft').map(item=>[item.id,true]));render()", context);
   assert.match(html, /确认同步 1 条/, '逐条勾选后才计入');
   assert.doesNotMatch(html, /被忽略的不显示/);
   vm.runInContext("state.view='workspace';state.workspace='产品团队';state.task=null;render()", context);
   assert.match(html, /空间概况[\s\S]*2 项工作/);
-  assert.match(html, /最新卡点：「沙特机房选址」报价未回/);
-  assert.match(html, /war-card[\s\S]*福州边缘一区下线[\s\S]*待确认/);
-  assert.match(html, /沙特机房选址[\s\S]*卡住[\s\S]*来自 TEZ 项目/);
+  assert.match(html, /1 条卡点见下方动态/);
+  assert.match(html.slice(html.indexOf('进展动态')), /示例机房选址[\s\S]*报价未回/, '卡点详情只在动态显示，不在概况重复');
+  assert.match(html, /war-card[\s\S]*示例节点下线[\s\S]*待确认/);
+  assert.match(html, /示例机房选址[\s\S]*卡住[\s\S]*来自 示例项目/);
   assert.match(html, /进展动态[\s\S]*第 2 批迁移清单 18 台/);
   assert.doesNotMatch(html.slice(html.indexOf('进展动态')), /缺 3 台机位信息/, '草稿不进入空间动态');
 });

@@ -1,6 +1,7 @@
 const { JsonStore } = require('./store.cjs');
 const { defaultWorkflow, normalizeWorkflow } = require('./workflow-service.cjs');
 const { TRANSPORTS } = require('./workbuddy-transport.cjs');
+const { relayOrigin } = require('./workbuddy-relay-client.cjs');
 
 const defaultSettings = () => ({
   model: { provider: 'openai', modelId: '', baseUrl: 'https://api.openai.com/v1' },
@@ -77,7 +78,7 @@ function normalizeSettings(input = {}) {
   if (!['mentions','authorized'].includes(messageScope)) throw new Error('企业微信消息范围无效');
   return {
     model: { provider, modelId, baseUrl },
-    agent: { mode, endpoint: agentEndpoint, ...(TRANSPORTS.includes(workbuddyTransport) ? { workbuddyTransport } : {}) },
+    agent: { mode, endpoint: agentEndpoint, ...(TRANSPORTS.includes(workbuddyTransport) ? { workbuddyTransport } : {}), ...(input.agent?.workbuddyRelayUrl != null ? { workbuddyRelayUrl: relayOrigin(input.agent.workbuddyRelayUrl) } : {}) },
     wecom: { organizationId, applicationId, recipientUserId, botId, messageScope },
     profile: { name: profileName, wecomUserId: profileWecom, feishuUserId: profileFeishu },
     feishu: { appId: feishuAppId, domain: feishuDomain },
@@ -127,12 +128,17 @@ class SettingsService {
   async writeWorkbuddyOAuth(record) {
     const value = record ? this.encrypt(JSON.stringify(record)) : null;
     await this.credentials.update(current => ({ ...current, workbuddyOAuth: value }));
+    require('./workbuddy-service.cjs').advanceLocalAssistantEpoch();
   }
 
   async setPrivacy(input = {}) {
     const privacy = normalizePrivacy(input);
     await this.settings.update(current => ({ ...current, privacy }));
     return this.getPublic();
+  }
+
+  async getWorkbuddyRelayUrl() {
+    return (await this.settings.read()).agent?.workbuddyRelayUrl || '';
   }
 
   async getWorkbuddyClient() {
@@ -147,15 +153,19 @@ class SettingsService {
   async getPublic() {
     const [settings, credentials] = await Promise.all([this.settings.read(), this.credentials.read()]);
     const modelProviders = ['openai', 'kimi', 'deepseek', 'compatible', 'local'];
+    const auth = await this.readWorkbuddyOAuth();
+    const relaySession = auth?.kind === 'relay';
+    const hasOAuth = relaySession ? Boolean(auth.relayUrl === settings.agent?.workbuddyRelayUrl && settings.agent?.workbuddyTransport !== 'cloud' && auth.expiresAt > Date.now()) : Boolean(credentials.workbuddyOAuth);
     return {
       ...settings,
+      configurationRevision: require('./workbuddy-service.cjs').localAssistantEpoch(),
       checks: settings.checks || {},
       hasModelKey: Boolean(savedModelKey(credentials, settings)),
       hasModelKeys: Object.fromEntries(modelProviders.map(provider => [provider, Boolean(savedModelKey(credentials, settings, provider))])),
       hasAgentToken: Boolean(credentials.agentToken),
       hasWecomSecret: Boolean(credentials.wecomSecret),
       hasWecomBotSecret: Boolean(credentials.wecomBotSecret) || Boolean(settings.wecom?.botId && typeof this.wecomBotSecretFallback === 'function' && await this.wecomBotSecretFallback().catch(() => null)),
-      hasWorkbuddyAccessToken: Boolean(credentials.workbuddyAccessToken || credentials.workbuddyOAuth),
+      hasWorkbuddyAccessToken: settings.agent?.workbuddyRelayUrl && settings.agent?.workbuddyTransport === 'localassistant' ? hasOAuth : Boolean(credentials.workbuddyAccessToken || hasOAuth),
       hasWorkbuddyManualToken: Boolean(credentials.workbuddyAccessToken),
       hasCloudagentApiKey: Boolean(credentials.cloudagentApiKey),
       hasFeishuSecret: Boolean(credentials.feishuAppSecret),
@@ -166,26 +176,43 @@ class SettingsService {
   }
 
   async getRuntimeConfig() {
+    const workbuddyEpoch = require('./workbuddy-service.cjs').localAssistantEpoch();
     const [settings, credentials] = await Promise.all([this.settings.read(), this.credentials.read()]);
     const decrypt = value => this.decrypt(value);
-    // A manually pasted token (debugging) wins; otherwise the OAuth session.
-    let workbuddyAccessToken = decrypt(credentials.workbuddyAccessToken);
+    // A relay credential must only reach its matching relay, NEVER WorkBuddy's
+    // official API/cloud endpoint or another configured server. Manual provider
+    // tokens remain a separate developer path; they cannot override the relay.
+    const oauth = await this.readWorkbuddyOAuth();
+    const viaRelay = Boolean(settings.agent?.workbuddyRelayUrl && settings.agent?.workbuddyTransport === 'localassistant');
+    let workbuddyAccessToken = viaRelay ? null : decrypt(credentials.workbuddyAccessToken);
     let workbuddyOpenId = null;
-    if (!workbuddyAccessToken && credentials.workbuddyOAuth && typeof this.workbuddyTokenProvider === 'function') {
+    if (viaRelay) {
+      // One snapshot supplies both the origin and the credential; never combine
+      // a fresh provider token with an older settings snapshot.
+      if (oauth?.kind === 'relay' && oauth.relayUrl === settings.agent.workbuddyRelayUrl && oauth.expiresAt > Date.now()) {
+        workbuddyAccessToken = oauth.sessionToken;
+        workbuddyOpenId = oauth.openId || null;
+      }
+    } else if (!workbuddyAccessToken && credentials.workbuddyOAuth && oauth?.kind !== 'relay' && typeof this.workbuddyTokenProvider === 'function') {
       try { workbuddyAccessToken = await this.workbuddyTokenProvider(); } catch { workbuddyAccessToken = null; }
-      if (workbuddyAccessToken) workbuddyOpenId = (await this.readWorkbuddyOAuth())?.openId || null;
+      // A simultaneous switch to relay authorization must not send that opaque
+      // session to the platform cloud endpoint.
+      const current = await this.readWorkbuddyOAuth();
+      if (current?.kind === 'relay' || current?.authorizedAt !== oauth?.authorizedAt) workbuddyAccessToken = null;
+      if (workbuddyAccessToken) workbuddyOpenId = oauth?.openId || null;
     }
     let wecomBotSecret = decrypt(credentials.wecomBotSecret);
     if (!wecomBotSecret && settings.wecom?.botId && typeof this.wecomBotSecretFallback === 'function') wecomBotSecret = await this.wecomBotSecretFallback().catch(() => null);
     let cloudagentApiKey = decrypt(credentials.cloudagentApiKey);
     if (!cloudagentApiKey && settings.agent?.mode === 'cloudagent' && typeof this.cloudagentKeyFallback === 'function') cloudagentApiKey = await this.cloudagentKeyFallback().catch(() => null);
-    return { ...settings, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret, workbuddyAccessToken, workbuddyOpenId, cloudagentApiKey, feishuAppSecret: decrypt(credentials.feishuAppSecret) };
+    return { ...settings, configurationRevision: workbuddyEpoch, modelKey: decrypt(savedModelKey(credentials, settings)), agentToken: decrypt(credentials.agentToken), wecomSecret: decrypt(credentials.wecomSecret), wecomBotSecret, workbuddyAccessToken, workbuddyOpenId, ...(viaRelay ? { workbuddyViaRelay: true, _workbuddyConfigurationEpoch: workbuddyEpoch } : {}), cloudagentApiKey, feishuAppSecret: decrypt(credentials.feishuAppSecret) };
   }
 
   async save(input = {}) {
     const settings = normalizeSettings(input);
     const previousSettings = await this.settings.read();
     if (!settings.privacy && previousSettings.privacy) settings.privacy = previousSettings.privacy;
+    if (input.agent?.workbuddyRelayUrl == null && previousSettings.agent?.workbuddyRelayUrl) settings.agent.workbuddyRelayUrl = previousSettings.agent.workbuddyRelayUrl;
     settings.modelProfiles = {
       ...(previousSettings.modelProfiles || {}),
       [previousSettings.model.provider]: previousSettings.model,
@@ -249,6 +276,7 @@ class SettingsService {
       }));
     }
     await this.settings.write(settings);
+    require('./workbuddy-service.cjs').advanceLocalAssistantEpoch();
     return this.getPublic();
   }
 

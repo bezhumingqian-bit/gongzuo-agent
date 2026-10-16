@@ -1,10 +1,8 @@
 const crypto = require('node:crypto');
-const { callModel, callExternalAgent } = require('./connection-service.cjs');
 const { callCodeBuddy } = require('./codebuddy-service.cjs');
-const { callWorkBuddy } = require('./workbuddy-service.cjs');
-const { callWorkBuddyCloud } = require('./workbuddy-cloud.cjs');
-const { callCloudAgent, retrieveCloudArtifacts } = require('./cloudagent.cjs');
+const { retrieveCloudArtifacts } = require('./cloudagent.cjs');
 const { workbuddyTransport, transportOf } = require('./workbuddy-transport.cjs');
+const { adapterFor } = require('./harness/adapters.cjs');
 
 // Who a cloud session belongs to: the WorkBuddy open_id, or the CodeBuddy API
 // key id (the part before the dot; never the secret).
@@ -30,12 +28,16 @@ const path = require('node:path');
 const { callLocalAgent, callLocalAgentSession } = require('./local-agent-service.cjs');
 
 const { classifyChannelEvent } = require('./contracts/policy.cjs');
+const { isCasualPrompt } = require('../demo/work-index.js');
 
-function createLocalTask({ goal, workspace }) {
+function createLocalTask({ goal, workspace, hasContext = false }) {
   const now = new Date().toISOString();
+  const kind = !hasContext && isCasualPrompt(goal) ? 'conversation' : 'work';
   return {
     id: crypto.randomUUID(),
     title: goal.length > 28 ? `${goal.slice(0, 28)}…` : goal,
+    titleSource: 'auto',
+    kind,
     goal,
     workspace,
     status: 'running',
@@ -43,10 +45,10 @@ function createLocalTask({ goal, workspace }) {
     createdAt: now,
     updatedAt: now,
     messages: [{ id: crypto.randomUUID(), role: 'user', text: goal, createdAt: now }],
-    steps: [
-      { id: crypto.randomUUID(), title: '确认目标与可用资料', status: 'done' },
-      { id: crypto.randomUUID(), title: '形成执行计划', status: 'running' },
-      { id: crypto.randomUUID(), title: '交付可检查的成果', status: 'todo' }
+    steps: kind === 'conversation' ? [] : [
+      { id: crypto.randomUUID(), title: '确认目标与可用资料', status: 'pending' },
+      { id: crypto.randomUUID(), title: '形成执行计划', status: 'pending' },
+      { id: crypto.randomUUID(), title: '交付可检查的成果', status: 'pending' }
     ]
   };
 }
@@ -75,7 +77,7 @@ class AgentService {
     if (missingToken) return { mode: this.mode, label: 'WorkBuddy 待授权', modelConnected: false, detail: `WorkBuddy ${transport === 'cloud' ? '云端任务' : '本地助理'}需要开放平台访问令牌。` };
     return {
       mode: configured ? kind : this.mode,
-      label: checked?.ok ? '连接测试通过' : settings?.agent?.mode === 'cloudagent' ? (configured ? 'CodeBuddy 云端' : 'CodeBuddy 云端 · 缺少 API Key') : handoff ? 'WorkBuddy 本机连接' : transport === 'cloud' ? 'WorkBuddy 云端任务' : configured ? '已配置 · 待验证' : '本地演示模式',
+      label: checked?.ok ? '连接测试通过' : settings?.agent?.mode === 'cloudagent' ? (configured ? '共作 Agent · 云端执行' : '共作 Agent · 缺少 CodeBuddy API Key') : handoff ? 'WorkBuddy 本机连接' : transport === 'cloud' ? 'WorkBuddy 云端任务' : configured ? '已配置 · 待验证' : '本地演示模式',
       modelConnected: Boolean(checked?.ok),
       detail: handoff
         ? '工作会排队等待 WorkBuddy 通过本机连接器领取，处理结果回到同一项工作。'
@@ -84,13 +86,7 @@ class AgentService {
   }
 
   isConfigured(config) {
-    if (config?.agent?.mode === 'external') return Boolean(config.agent.endpoint);
-    if (config?.agent?.mode === 'codebuddy') return true;
-    if (config?.agent?.mode === 'cloudagent') return Boolean(config.cloudagentApiKey);
-    if (['codex', 'kimi'].includes(config?.agent?.mode)) return true;
-    // The local MCP hand-off needs no credentials; Open API transports need a token.
-    if (config?.agent?.mode === 'workbuddy') return transportOf(config) === 'handoff' || Boolean(config.workbuddyAccessToken);
-    return Boolean(config?.model?.modelId && (!['openai', 'kimi', 'deepseek'].includes(config.model.provider) || config.modelKey || (config.model.provider === 'openai' && process.env.OPENAI_API_KEY)));
+    return Boolean(config && adapterFor(config).isConfigured(config));
   }
 
   async answer(task, config, memoryContext = {}, hooks = {}) {
@@ -98,26 +94,11 @@ class AgentService {
     const transport = config.agent.mode === 'workbuddy' ? transportOf(config) : null;
     // The local hand-off is pulled by WorkBuddy; TaskRunner never calls answer() for it.
     if (transport === 'handoff') return null;
+    const adapter = adapterFor(config);
     try {
-      const result = config.agent.mode === 'external'
-        ? await callExternalAgent(config, task.messages, task.workspace, memoryContext, this.fetchImpl)
-        : config.agent.mode === 'codebuddy'
-          ? await this.codeBuddyImpl(task.messages, task.workspace, memoryContext)
-          : config.agent.mode === 'cloudagent'
-            ? await (this.cloudAgentImpl || callCloudAgent)(config, task.messages, task.workspace, memoryContext, { sessionId: cloudSessionFor(task, config), workId: task.id, title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
-          : transport === 'cloud'
-            ? await (this.cloudImpl || callWorkBuddyCloud)(config, task.messages, task.workspace, memoryContext, { sessionId: cloudSessionFor(task, config), title: task.title, onProgress: hooks.onProgress, fetchImpl: this.fetchImpl })
-          : config.agent.mode === 'workbuddy'
-            ? await callWorkBuddy(config, task.messages, this.fetchImpl)
-          : ['codex', 'kimi'].includes(config.agent.mode)
-            ? this.sessionsRoot && /^[a-zA-Z0-9-]{1,100}$/.test(task.id)
-              ? await callLocalAgentSession(config.agent.mode, task.messages, task.workspace, memoryContext, {
-                sessionDir: path.join(this.sessionsRoot, task.id, config.agent.mode), sessionId: task.agentSessionId
-              })
-              : await callLocalAgent(config.agent.mode, task.messages, task.workspace, memoryContext)
-          : await callModel(config, task.messages, memoryContext, this.fetchImpl);
+      const result = await adapter.run({ service: this, task, config, memory: memoryContext, hooks, cloudSession: cloudSessionFor(task, config) });
       const text = typeof result === 'string' ? result : result.text;
-      return { id: crypto.randomUUID(), role: 'assistant', text, createdAt: new Date().toISOString(), source: ['codebuddy', 'codex', 'kimi', 'cloudagent'].includes(config.agent.mode) ? config.agent.mode : config.agent.mode === 'workbuddy' ? (result.pending ? 'workbuddy-pending' : 'workbuddy') : config.agent.mode === 'external' ? 'external-agent' : 'model', ...(result.messageId ? { externalMessageId: result.messageId } : {}), ...(result.sessionId ? { agentSessionId: result.sessionId } : {}), ...(transport === 'cloud' ? { via: 'cloud-task', agentSessionOwner: sessionOwner(config) } : {}), ...(config.agent.mode === 'cloudagent' ? { agentSessionOwner: sessionOwner(config) } : {}), ...(result.files?.length ? { pendingFiles: result.files, pendingFilesDirectory: result.filesDirectory } : {}) };
+      return { id: crypto.randomUUID(), role: 'assistant', text, createdAt: new Date().toISOString(), source: adapter.source(result, config), ...(result.messageId ? { externalMessageId: result.messageId } : {}), ...(result.viaRelay ? { via: 'localassistant-relay' } : {}), ...(result.sessionId ? { agentSessionId: result.sessionId } : {}), ...(result.stopReason ? { stopReason: result.stopReason } : {}), ...(transport === 'cloud' ? { via: 'cloud-task', agentSessionOwner: sessionOwner(config) } : {}), ...(config.agent.mode === 'cloudagent' ? { agentSessionOwner: sessionOwner(config) } : {}), ...(result.files?.length ? { pendingFiles: result.files, pendingFilesDirectory: result.filesDirectory } : {}), ...(result.kernel ? { kernel: result.kernel } : {}), ...(result.proposals?.length ? { proposals: result.proposals } : {}), ...(result.approvals?.length ? { approvals: result.approvals } : {}) };
     } catch (error) {
       return { id: crypto.randomUUID(), role: 'assistant', text: `连接失败：${error.message}`, createdAt: new Date().toISOString(), source: 'connection-error' };
     }

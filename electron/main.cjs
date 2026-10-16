@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell } = require('electron');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const crypto = require('node:crypto');
 const { configureRuntimeChannel, linkScheme } = require('./runtime-channel.cjs');
 // Set paths before the single-instance lock is acquired. Packaged previews
@@ -14,7 +15,9 @@ const { WorkOperations } = require('./contracts/work-operations.cjs');
 const { memorySeed, createMemory, extractCandidate } = require('./memory-service.cjs');
 const { SettingsService } = require('./settings-service.cjs');
 const { testConnection } = require('./connection-service.cjs');
-const { readWorkBuddyReply } = require('./workbuddy-service.cjs');
+const { ConnectionStatusService } = require('./connection-status.cjs');
+const connectionStatusService = new ConnectionStatusService();
+const { readWorkBuddyReply, releaseWorkBuddyMessage, hasLocalAssistantOperations, withLocalAssistantConfiguration } = require('./workbuddy-service.cjs');
 const { modelPortalUrl, WORKBUDDY_PORTAL } = require('./provider-links.cjs');
 const { DocumentService } = require('./document-service.cjs');
 const { createProjectWorkspace, addProjectMember, linkWecomProjectMember, linkFeishuProjectMember, decideJoinRequest, removePendingProjectMember, updatePendingProjectMemberRole, migrateLegacyWorkspaceMembers, ensurePersonalWorkspace, personalWorkspace } = require('./workspace-service.cjs');
@@ -22,7 +25,7 @@ const { TaskRunner } = require('./task-runner.cjs');
 const { WecomDelivery, recipientUserId, fetchVisibleMembers, sendViaWecom } = require('./wecom-service.cjs');
 const { WecomBotBridge } = require('./wecom-bot-service.cjs');
 const { WorkBuddyBridge } = require('./workbuddy-bridge.cjs');
-const { WorkBuddyOAuth } = require('./workbuddy-oauth.cjs');
+const { WorkBuddyRelayAuth } = require('./workbuddy-relay-client.cjs');
 const { notifyMember, reachability, botContacts } = require('./channel-router.cjs');
 
 let mainWindow;
@@ -48,7 +51,7 @@ function assertString(value, name, max = 2000) {
 }
 
 function isTrustedSender(event) {
-  return Boolean(mainWindow && event.sender === mainWindow.webContents && !event.senderFrame?.url.startsWith('http'));
+  return Boolean(mainWindow && event.sender === mainWindow.webContents && event.senderFrame && event.senderFrame === mainWindow.webContents.mainFrame && event.senderFrame.url === pathToFileURL(path.join(__dirname, '..', 'demo', 'index.html')).href);
 }
 
 function publishData(data) {
@@ -69,7 +72,7 @@ function registerIpc() {
     const selection = await dialog.showOpenDialog(mainWindow, {
       title: `上传到${data.workspaces.find(item => item.id === id).name}`,
       properties: ['openFile', 'multiSelections'],
-      filters: [{ name: '文档', extensions: ['pdf', 'docx', 'doc', 'txt', 'md', 'csv', 'xlsx', 'xls', 'pptx', 'ppt'] }]
+      filters: [{ name: '文档', extensions: ['pdf', 'docx', 'doc', 'txt', 'md', 'csv', 'xlsx', 'xls', 'pptx', 'ppt', 'html', 'htm', 'png', 'jpg', 'jpeg', 'gif', 'webp'] }]
     });
     if (selection.canceled || !selection.filePaths.length) return [];
     return documentService.upload(id, selection.filePaths);
@@ -90,9 +93,29 @@ function registerIpc() {
     return documentService.setArchived(assertString(id, '资料 ID', 100), false);
   });
 
+  ipcMain.handle('documents:preview', async (event, input = {}) => {
+    const trustedUrl = pathToFileURL(path.join(__dirname, '..', 'demo', 'index.html')).href;
+    if (!isTrustedSender(event) || !event.senderFrame || event.senderFrame !== mainWindow.webContents.mainFrame || event.senderFrame.url !== trustedUrl) throw new Error('不受信任的请求');
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('预览请求无效');
+    const taskId = assertString(input.taskId, '工作 ID', 100);
+    const id = assertString(input.id, '资料 ID', 100);
+    const data = await store.read();
+    const task = data.tasks.find(item => item.id === taskId);
+    if (!task) throw new Error('工作不存在');
+    await workOps.view(actors.local(), task.id);
+    if (!task.messages?.some(message => Array.isArray(message.artifacts) && message.artifacts.some(artifact => artifact?.id === id))) throw new Error('资料不属于这项工作的成果');
+    const names = new Set([task.workspace, ...(Array.isArray(task.relatedWorkspaces) ? task.relatedWorkspaces : [])]);
+    const allowedWorkspaceIds = data.workspaces.filter(space => names.has(space.name) || ['personal', 'public'].includes(space.type)).map(space => space.id);
+    return documentService.preview(id, allowedWorkspaceIds);
+  });
+
   ipcMain.handle('documents:open', async (event, id) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     const filePath = await documentService.getFilePath(assertString(id, '资料 ID', 100));
+    if (/\.html?$/i.test(filePath)) {
+      const confirmation = await dialog.showMessageBox(mainWindow, { type: 'warning', title: '在本机浏览器打开生成的页面？', message: '本机浏览器不使用共作的隔离预览', detail: '页面脚本可能联网或跳转。只打开你信任的成果；如只需查看，请留在右侧预览。', buttons: ['取消', '信任并打开'], defaultId: 0, cancelId: 0 });
+      if (confirmation.response !== 1) return false;
+    }
     const error = await shell.openPath(filePath);
     if (error) throw new Error(`无法打开资料：${error}`);
     return true;
@@ -110,9 +133,37 @@ function registerIpc() {
 
   ipcMain.handle('settings:save', async (event, input) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    return withLocalAssistantConfiguration(async () => {
+    const pendingRelay = hasLocalAssistantOperations() || (await store.read()).tasks.some(task => (task.agentMode === 'workbuddy' && ['queued','running'].includes(task.agentRun?.status)) || task.messages?.some(m => m.source === 'workbuddy-pending' && m.via === 'localassistant-relay'));
+    if (hasLocalAssistantOperations() && input?.agent?.workbuddyTransport && input.agent.workbuddyTransport !== 'localassistant') throw new Error('本地助理仍在发送或读取，请稍后再切换连接方式');
+    if (pendingRelay && input?.agent?.workbuddyRelayUrl != null && input.agent.workbuddyRelayUrl.replace(/\/$/, '') !== await settingsService.getWorkbuddyRelayUrl()) throw new Error('还有本地助理任务在监听，请先核对并结束监听，再改授权服务地址');
     const result = await settingsService.save(input);
     await wecomBot.restart('settings-save');
     return { ...result, wecomBotStatus: wecomBot.status };
+    });
+  });
+
+  ipcMain.handle('integrations:status', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const allowed = ['model','agent','wecom','feishu','wecom-bot'];
+    if (!Array.isArray(input.kinds) || input.kinds.length > allowed.length || input.kinds.some(kind => !allowed.includes(kind))) throw new Error('连接类型无效');
+    const config = await settingsService.getRuntimeConfig();
+    const values = await Promise.all([...new Set(input.kinds)].map(async kind => [kind, await connectionStatusService.get(kind, config, { bridge: workbuddyBridge, bot: wecomBot, force: input.force === true })]));
+    return { statuses: Object.fromEntries(values), configurationRevision: config.configurationRevision };
+  });
+
+  ipcMain.handle('integrations:reconnect', async (event, kind) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    if (!['model','agent','wecom','feishu','wecom-bot'].includes(kind)) throw new Error('连接类型无效');
+    // Explicit recovery only. Never resend a task, create a sandbox, invoke a
+    // model, alter a credential, or open OAuth during an automatic status check.
+    if (kind === 'wecom-bot' && !['已连接','连接中','重连中'].includes(wecomBot.status)) await wecomBot.restart('user-reconnect');
+    if (kind === 'agent') {
+      const config = await settingsService.getRuntimeConfig();
+      if (config.agent?.mode === 'workbuddy' && require('./workbuddy-transport.cjs').transportOf(config) === 'handoff' && !workbuddyBridge?.status.listening) await workbuddyBridge.start();
+    }
+    const config = await settingsService.getRuntimeConfig();
+    return { status: await connectionStatusService.get(kind, config, { bridge: workbuddyBridge, bot: wecomBot, force: true }), configurationRevision: config.configurationRevision };
   });
 
   ipcMain.handle('integrations:test', async (event, kind) => {
@@ -150,15 +201,28 @@ function registerIpc() {
 
   ipcMain.handle('workbuddy:authorize', async event => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
-    const record = await workbuddyAuth.authorize();
-    await settingsService.recordCheck('agent', { ok: true, message: `已授权 WorkBuddy${record.nickname ? `：${record.nickname}` : ''}` });
+    const authorizationGeneration = workbuddyAuth.abortGeneration;
+    return withLocalAssistantConfiguration(async () => {
+    if ((await store.read()).tasks.some(task => (task.agentMode === 'workbuddy' && ['queued','running'].includes(task.agentRun?.status)) || task.messages?.some(m => m.source === 'workbuddy-pending' && m.via === 'localassistant-relay'))) throw new Error('还有 WorkBuddy 任务在监听；核对并结束监听后再重新授权，避免原授权无法释放任务');
+    const record = await workbuddyAuth.authorize({ generation: authorizationGeneration });
+    await settingsService.recordCheck('agent', { ok: false, message: `已授权 WorkBuddy${record.nickname ? `：${record.nickname}` : ''}；请测试本地助理在线状态` });
+    return workbuddyAuth.status();
+    });
+  });
+
+  ipcMain.handle('workbuddy:cancel-authorization', async event => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    await workbuddyAuth.cancel();
     return workbuddyAuth.status();
   });
 
   ipcMain.handle('workbuddy:sign-out', async event => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    return withLocalAssistantConfiguration(async () => {
+    if ((await store.read()).tasks.some(task => (task.agentMode === 'workbuddy' && ['queued','running'].includes(task.agentRun?.status)) || task.messages?.some(m => m.source === 'workbuddy-pending' && m.via === 'localassistant-relay'))) throw new Error('还有 WorkBuddy 任务在监听；请先核对并结束监听，再退出授权');
     await workbuddyAuth.signOut();
     return workbuddyAuth.status();
+    });
   });
 
   ipcMain.handle('integrations:open-workbuddy-portal', async event => {
@@ -225,7 +289,8 @@ function registerIpc() {
     // New work starts in the personal space unless a space was chosen.
     const workspace = current.workspaces.some(item => item.name === input.workspace) ? input.workspace : personalWorkspace(current)?.name || current.activeWorkspace;
     const mentions = Array.isArray(input.mentions) ? input.mentions.slice(0, 10) : [];
-    const task = await workOps.create(actors.local(), { workspace, goal, documentIds: input.documentIds || [], relatedWorkspaces: Array.isArray(input.relatedWorkspaces) ? input.relatedWorkspaces.slice(0, 10) : null, options: mentions.length ? { mentions } : {} });
+    if (input.agentMode != null && !['built-in', 'external', 'codebuddy', 'workbuddy', 'cloudagent', 'codex', 'kimi'].includes(input.agentMode)) throw new Error('Agent 类型无效');
+    const task = await workOps.create(actors.local(), { workspace, goal, documentIds: input.documentIds || [], relatedWorkspaces: Array.isArray(input.relatedWorkspaces) ? input.relatedWorkspaces.slice(0, 10) : null, options: { ...(mentions.length ? { mentions } : {}), ...(input.agentMode ? { agentMode: input.agentMode } : {}) } });
     if (task.messages?.[0]?.mentions?.length) await wecomDelivery.sendMentions(task.id, task.messages[0].id);
     return (await store.read()).tasks.find(item => item.id === task.id) || task;
   });
@@ -238,10 +303,10 @@ function registerIpc() {
     return workOps.handover(actors.local(), taskId, { workspace, messageIds });
   });
 
-  ipcMain.handle('tasks:retrieve-cloud-files', async (event, taskId) => {
+  ipcMain.handle('tasks:retrieve-cloud-files', async (event, taskId, messageId = null) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     const { task } = await workOps.resolve(actors.local(), assertString(taskId, '任务 ID', 100), 'work.append');
-    return taskRunner.retrieveCloudFiles(task.id);
+    return taskRunner.retrieveCloudFiles(task.id, messageId == null ? null : assertString(messageId, '消息 ID', 100));
   });
 
   ipcMain.handle('tasks:set-conversation-shared', async (event, input = {}) => {
@@ -271,6 +336,14 @@ function registerIpc() {
   ipcMain.handle('tasks:retry-agent', async (event, taskId) => {
     if (!isTrustedSender(event)) throw new Error('不受信任的请求');
     return taskRunner.retry(assertString(taskId, '任务 ID', 100));
+  });
+
+  // 允许 / 拒绝 an action the executing Agent is waiting on (approval broker).
+  ipcMain.handle('tasks:resolve-approval', async (event, taskId, approvalId, outcome) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    const { task } = await workOps.resolve(actors.local(), assertString(taskId, '任务 ID', 100), 'work.append');
+    if (!['allow', 'reject'].includes(outcome)) throw new Error('确认结果无效');
+    return taskRunner.resolveApproval(task.id, assertString(approvalId, '确认 ID', 100), outcome);
   });
 
   ipcMain.handle('wecom:forward-to-members', async (event, input = {}) => {
@@ -319,20 +392,46 @@ function registerIpc() {
     const existing = (await store.read()).tasks.find(item => item.id === id);
     const pending = existing?.messages?.find(item => item.id === messageId && item.source === 'workbuddy-pending' && item.externalMessageId);
     if (!pending) throw new Error('此工作没有待取回的 WorkBuddy 回复');
-    const reply = await readWorkBuddyReply(await settingsService.getRuntimeConfig(), pending.externalMessageId);
+    await workOps.view(actors.local(), id);
+    const config = await settingsService.getRuntimeConfig();
+    if (pending.via === 'localassistant-relay' && !config.workbuddyViaRelay) throw new Error('当前不是原来的 HTTPS 本地助理连接，请恢复该连接与授权后取回');
+    const reply = await readWorkBuddyReply(config, pending.externalMessageId);
     if (!reply) return { ready: false };
     const data = await store.update(draft => {
       const item = draft.tasks.find(task => task.id === id)?.messages.find(message => message.id === pending.id);
       if (item && item.source === 'workbuddy-pending') {
         item.text = reply.slice(0, 50000);
-        item.source = 'workbuddy';
+        // A local-assistant text reply is not an authoritative completion event.
+        // Keep the relay lease until the user explicitly verifies the PC task.
+        item.source = pending.via === 'localassistant-relay' ? 'workbuddy-pending' : 'workbuddy';
         const task = draft.tasks.find(task => task.id === id);
         if (task?.workflow) { task.status = 'review'; task.needsMe = true; }
       }
       return draft;
     });
     publishData(data);
-    return { ready: true };
+    return { ready: true, observing: pending.via === 'localassistant-relay' };
+  });
+
+  ipcMain.handle('tasks:release-workbuddy', async (event, input = {}) => {
+    if (!isTrustedSender(event)) throw new Error('不受信任的请求');
+    if (input.confirmed !== true) throw new Error('请先确认已在 WorkBuddy 核对执行结果');
+    const id = assertString(input.taskId, '工作 ID', 100);
+    const messageId = assertString(input.messageId, '消息 ID', 100);
+    await workOps.view(actors.local(), id);
+    const task = (await store.read()).tasks.find(item => item.id === id);
+    const pending = task?.messages?.find(item => item.id === messageId && item.source === 'workbuddy-pending' && item.via === 'localassistant-relay' && item.externalMessageId);
+    if (!pending) throw new Error('此工作没有 HTTPS 本地助理监听');
+    const selection = await dialog.showMessageBox(mainWindow, { type: 'question', title: '结束本次监听', message: '你已经在 WorkBuddy 核对这次任务结束了吗？', detail: '只释放共作对消息流的占用，不会停止 WorkBuddy 的任务；未结束时释放可能影响后续回复匹配。', buttons: ['继续监听', '已核对，结束监听'], defaultId: 0, cancelId: 0 });
+    if (selection.response !== 1) return { released: false };
+    await releaseWorkBuddyMessage(await settingsService.getRuntimeConfig(), pending.externalMessageId);
+    const data = await store.update(draft => {
+      const m = draft.tasks.find(item => item.id === id)?.messages.find(item => item.id === messageId);
+      if (m) { m.source = 'workbuddy'; m.observationEndedAt = new Date().toISOString(); }
+      return draft;
+    });
+    publishData(data);
+    return { released: true };
   });
 
   ipcMain.handle('workspace:set-active', async (event, name) => {
@@ -572,6 +671,13 @@ function createWindow() {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', event => event.preventDefault());
+  // Generated HTML can run isolated inline scripts, but cannot navigate a frame
+  // to HTTP/local files, open windows, access Node or the preload IPC.
+  // Scripts are off by default; trusted interactive mode is not full network isolation.
+  mainWindow.webContents.on('will-frame-navigate', (event, url) => {
+    const target = event.url || url || '';
+    if (!['about:blank', 'about:srcdoc'].includes(target) && !target.startsWith('data:application/pdf;base64,')) event.preventDefault();
+  });
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.loadFile(path.join(__dirname, '..', 'demo', 'index.html'));
 }
@@ -607,7 +713,7 @@ app.whenReady().then(async () => {
     path.join(app.getPath('userData'), 'credentials.json'),
     safeStorage
   );
-  workbuddyAuth = new WorkBuddyOAuth({ settingsService, openExternal: url => shell.openExternal(url) });
+  workbuddyAuth = new WorkBuddyRelayAuth({ settingsService, openExternal: url => shell.openExternal(url) });
   settingsService.workbuddyTokenProvider = () => workbuddyAuth.getAccessToken();
   settingsService.cloudagentKeyFallback = require('./cloudagent.cjs').readKeychainKey;
   settingsService.wecomBotSecretFallback = () => require('./workbuddy-oauth.cjs').readKeychain('cn.gongzuo.wecom.bot-secret');

@@ -1,11 +1,14 @@
 const crypto = require('node:crypto');
-const { createLocalTask } = require('./agent-service.cjs');
+const { createLocalTask, sessionOwner } = require('./agent-service.cjs');
 const { getApplicableMemories } = require('./memory-service.cjs');
 const { resolveMentions } = require('./mention-service.cjs');
 const { asksToReadWecomInbox, wecomInboxForAgent } = require('./channel-inbox.cjs');
 const { conversationInput } = require('./connection-service.cjs');
+const { ApprovalBroker } = require('./harness/approvals.cjs');
 const { mayUsePersonalMemory } = require('./contracts/policy.cjs');
 const progress = require('./progress-service.cjs');
+const { mergeStep } = require('./execution-log.cjs');
+const { classifyTask, isRequest } = require('../demo/work-index.js');
 
 // WorkBuddy has two transports: the official Open API (needs an OAuth token) and
 // the local MCP hand-off, where WorkBuddy pulls queued work from this app.
@@ -51,8 +54,9 @@ function messagesThroughTrigger(messages, triggerId) {
 }
 
 class TaskRunner {
-  constructor({ store, settingsService, personalMemoryStore, teamMemoryStore, documentService, agent, publish }) {
+  constructor({ store, settingsService, personalMemoryStore, teamMemoryStore, documentService, agent, publish, approvals }) {
     Object.assign(this, { store, settingsService, personalMemoryStore, teamMemoryStore, documentService, agent, publish });
+    this.approvals = approvals || new ApprovalBroker();
     this.queues = new Map();
   }
 
@@ -80,7 +84,7 @@ class TaskRunner {
     const related = Array.isArray(options.relatedWorkspaces) ? options.relatedWorkspaces : [];
     const refs = await this.documentRefs(workspace, documentIds, related, { fromChannel: Boolean(origin) });
     const config = await this.settingsService.getRuntimeConfig();
-    const task = createLocalTask({ goal, workspace });
+    const task = createLocalTask({ goal, workspace, hasContext: Boolean(refs.length || (Array.isArray(options.mentions) && options.mentions.length) || options.workflow) });
     if (related.length) task.relatedWorkspaces = related;
     if (Array.isArray(options.mentions) && options.mentions.length) {
       const mentions = resolveMentions(await this.store.read(), task, options.mentions);
@@ -93,6 +97,7 @@ class TaskRunner {
     if (options.workflow) {
       task.workflow = options.workflow;
       task.title = options.title || task.title;
+      if (options.title) task.titleSource = 'manual';
     }
     const selectedConfig = { ...config, agent: { ...config.agent, mode: task.agentMode } };
     task.agentRun = { status: this.agent.isConfigured(selectedConfig) ? 'queued' : 'not-configured', triggerId: task.messages[0].id };
@@ -115,6 +120,7 @@ class TaskRunner {
       message = { id: crypto.randomUUID(), role: 'user', text, createdAt: new Date().toISOString(), mentions, mentionDelivery: mentions.length ? 'not_sent' : null, documentRefs: refs };
       if (origin) message.wecomOrigin = origin;
       task.messages.push(message);
+      if (task.kind === 'conversation' && !origin && spaceNamed(draft, task.workspace)?.type === 'personal' && isRequest(text)) task.kind = 'work';
       if (task.channelOnly) { task.channelOnly = false; task.status = 'running'; }
       task.updatedAt = message.createdAt;
       return draft;
@@ -293,7 +299,19 @@ class TaskRunner {
       }
       return { ...item, text: parts.join('\n\n') };
     }) };
-    return { task, snapshot, memory, config, isolated };
+    // What the 共作 kernel's tools may look up on their own: the work's spaces
+    // and the public space; personal materials only in personal work (an
+    // explicitly referenced one stays readable).
+    const personalIds = new Set(spacesOfType(data, 'personal').map(space => space.id));
+    const lookupIds = docSpaceIds.filter(id => inPersonal || !personalIds.has(id));
+    const referenced = new Set(refs.map(ref => ref.id));
+    const spaceNames = Object.fromEntries(data.workspaces.map(space => [space.id, space.name]));
+    const toolScope = {
+      spaceNames,
+      listMaterials: async () => (await this.documentService.list()).filter(item => item.status === 'active' && lookupIds.includes(item.workspaceId)),
+      readMaterial: id => this.documentService.readForAgent(id, referenced.has(id) ? docSpaceIds : lookupIds)
+    };
+    return { task, snapshot, memory, config, isolated, toolScope };
   }
 
   async run(taskId, triggerId) {
@@ -316,7 +334,8 @@ class TaskRunner {
       // What the work page shows while the Agent runs: since when, the last
       // sign of life from the Agent, how many steps, and whether 共作 is
       // reconnecting or waiting for an earlier request to finish.
-      const live = { status: 'running', triggerId, startedAt: new Date().toISOString(), steps: 0, phase: 'working' };
+      const sameRun = before.agentRun?.triggerId === triggerId && ['interrupted', 'failed'].includes(before.agentRun.status);
+      const live = { status: 'running', triggerId, startedAt: sameRun && before.agentRun.startedAt || new Date().toISOString(), steps: 0, execution: sameRun ? before.agentRun.execution || [] : [], phase: 'working' };
       await this.setRunStatus(taskId, live);
       let prepared;
       try { prepared = await this.prepare(taskId, triggerId); }
@@ -329,25 +348,57 @@ class TaskRunner {
       let flushTimer = null;
       let lastFlush = 0;
       let finished = false;
+      let persistedSession = null;
       const flush = () => {
         flushTimer = null;
         if (finished) return;
         lastFlush = Date.now();
         this.updateLiveRun(taskId, triggerId, { ...live }).catch(() => {});
       };
-      const onProgress = ({ text, step, steps, lastActivityAt, phase, attempt } = {}) => {
+      const onProgress = ({ text, step, steps, lastActivityAt, phase, attempt, sessionId, execution } = {}) => {
+        if (finished) return;
+        if (Array.isArray(execution)) for (const item of execution.slice(-120)) live.execution = mergeStep(live.execution, { ...item, replayed: item.startedAt == null });
         const visible = String(text || '').replace(/<(进展|progress)>[\s\S]*$/u, '').trim();
         const said = step ? `正在${step}` : visible ? visible.slice(-200) : '';
         if (said) live.progress = said.slice(0, 240);
-        live.lastActivityAt = new Date(lastActivityAt || Date.now()).toISOString();
+        // Connection/replay notifications are not work. Never reset activity
+        // merely because we started to reconnect or loaded history.
+        const activity = lastActivityAt != null ? new Date(lastActivityAt).getTime()
+          : !phase && (text || step) ? Date.now() : NaN;
+        if (Number.isFinite(activity) && activity > 0) live.lastActivityAt = new Date(activity).toISOString();
         if (Number.isFinite(steps)) live.steps = steps;
         live.phase = phase || 'working';
         if (attempt) live.attempt = attempt; else delete live.attempt;
+        if (sessionId && sessionId !== persistedSession) {
+          persistedSession = sessionId;
+          clearTimeout(flushTimer); flushTimer = null; lastFlush = Date.now();
+          // CloudAgent awaits this before sending: save the session even if
+          // the first prompt runs longer than the app stays open.
+          return this.updateLiveRun(taskId, triggerId, { ...live }, sessionId, prepared.config, prepared.isolated);
+        }
         if (!flushTimer) flushTimer = setTimeout(flush, Math.max(0, 1500 - (Date.now() - lastFlush)));
       };
+      // An engine asks for an action that needs a human: show it on the work
+      // page and wait for 允许 / 拒绝 (declined when nobody answers in time).
+      const onPermission = async request => {
+        const { approval, decision } = this.approvals.open({ taskId, triggerId, title: request?.title, kind: request?.kind });
+        live.pendingApproval = { id: approval.id, title: approval.title, kind: approval.kind, requestedAt: approval.requestedAt, expiresAt: approval.expiresAt };
+        live.phase = 'awaiting-approval';
+        await this.updateLiveRun(taskId, triggerId, { ...live }).catch(() => {});
+        const result = await decision;
+        delete live.pendingApproval;
+        live.phase = 'working';
+        live.approvals = [...(live.approvals || []), { title: approval.title, outcome: result.outcome, reason: result.reason, at: Date.now() }].slice(-20);
+        await this.updateLiveRun(taskId, triggerId, { ...live }).catch(() => {});
+        return result;
+      };
       let answer;
-      try { answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory, { onProgress }); }
-      finally { finished = true; clearTimeout(flushTimer); }
+      try { answer = await this.agent.answer(prepared.snapshot, prepared.config, prepared.memory, { onProgress, toolScope: prepared.toolScope, onPermission }); }
+      finally { finished = true; clearTimeout(flushTimer); this.approvals.cancelTask(taskId); delete live.pendingApproval; }
+      live.endedAt = new Date().toISOString();
+      await this.updateLiveRun(taskId, triggerId, { ...live });
+      if (answer) answer.execution = { startedAt: live.startedAt, endedAt: live.endedAt, steps: live.steps, entries: live.execution.map(item => ({ ...item })) };
+      if (answer && live.approvals?.length) answer.approvals = live.approvals.map(item => ({ ...item }));
       if (answer && prepared.isolated) answer.isolatedSession = true;
       if (answer?.pendingFiles) await this.attachAnswerFiles(prepared.task, answer);
       await this.recordAnswer(taskId, triggerId, answer);
@@ -356,12 +407,22 @@ class TaskRunner {
     }
   }
 
+  // 允许 / 拒绝 from the work page for an action an engine is waiting on.
+  resolveApproval(taskId, approvalId, outcome) {
+    if (!this.approvals.resolve(taskId, approvalId, outcome)) throw new Error('这项确认已经结束或不存在');
+    return { ok: true };
+  }
+
   // Progress writes never overwrite a run that has already ended or moved on.
-  async updateLiveRun(taskId, triggerId, run) {
+  async updateLiveRun(taskId, triggerId, run, sessionId = null, config = null, isolated = false) {
     const data = await this.store.update(draft => {
       const task = draft.tasks.find(item => item.id === taskId);
       if (task?.agentRun?.status === 'running' && task.agentRun.triggerId === triggerId) {
         task.agentRun = { ...run, updatedAt: new Date().toISOString() };
+        if (sessionId && !isolated) {
+          task.agentSessionId = sessionId;
+          task.agentSessionOwner = sessionOwner(config);
+        }
         task.updatedAt = task.agentRun.updatedAt;
       }
       return draft;
@@ -386,7 +447,7 @@ class TaskRunner {
       if (!space || !files.length || typeof this.documentService?.upload !== 'function') return;
       answer.artifactsWorkspace = space.name;
       const origin = { taskId: task.id, taskTitle: task.title || task.goal, workspace: task.workspace, agent: answer.source, messageId: answer.id };
-      const saved = await this.documentService.upload(space.id, files.slice(0, 10).map(file => file.path), { origin });
+      const saved = await this.documentService.upload(space.id, files.slice(0, 10).map(file => file.path), { origin, names: files.slice(0, 10).map(file => file.name) });
       answer.artifacts = saved.map(item => ({ id: item.id, name: item.name }));
     } catch (error) {
       answer.text = `${answer.text}\n\n（生成的文件未能存入资料：${String(error?.message || '未知错误').slice(0, 120)}）`;
@@ -397,16 +458,24 @@ class TaskRunner {
 
   // 「取回云端文件」: bring back deliverables a CloudAgent work left in its
   // sandbox that 共作 does not have yet; they join the latest cloud reply.
-  async retrieveCloudFiles(taskId) {
+  async retrieveCloudFiles(taskId, messageId = null) {
     const data = await this.store.read();
     const task = data.tasks.find(item => item.id === taskId);
     if (!task) throw new Error('工作不存在');
-    const reply = [...task.messages].reverse().find(item => item.role === 'assistant' && item.source === 'cloudagent');
-    if (!task.agentSessionId || !reply) throw new Error('这项工作没有 CodeBuddy 云端沙箱');
+    const reply = messageId ? task.messages.find(item => item.id === messageId && item.role === 'assistant' && item.source === 'cloudagent')
+      : [...task.messages].reverse().find(item => item.role === 'assistant' && item.source === 'cloudagent');
+    if (!reply) throw new Error('这条云端回复不存在');
+    const sessionId = reply.agentSessionId || task.agentSessionId;
+    if (!sessionId) throw new Error('这项工作没有 CodeBuddy 云端沙箱');
     if (typeof this.agent.retrieveCloudFiles !== 'function') throw new Error('当前版本不支持取回云端文件');
     const runtime = await this.settingsService.getRuntimeConfig();
     const known = (await this.documentService.list()).filter(item => item.origin?.taskId === task.id && item.status === 'active');
-    const fetched = await this.agent.retrieveCloudFiles(runtime, task.agentSessionId, { exclude: new Set(known.map(item => `${item.name}:${item.size}`)) });
+    const owner = reply.agentSessionOwner || task.agentSessionOwner;
+    if (owner && owner !== sessionOwner({ ...runtime, agent: { ...runtime.agent, mode: 'cloudagent' } })) throw new Error('云端文件属于另一授权，请切回创建它的 CodeBuddy 授权');
+    const names = new Set((String(reply.text || '').match(/[\p{L}\p{N}_ .-]+\.(?:pptx?|docx?|xlsx?|pdf|md|csv|txt|html?|png|jpe?g|gif|webp)\b/giu) || []).map(name => name.trim()));
+    // Never hang every historical deliverable under an unrelated latest reply.
+    if (!names.size) throw new Error('这条回复没有明确成果文件名，请让 Agent 在回复中列出文件名后再取回');
+    const fetched = await this.agent.retrieveCloudFiles(runtime, sessionId, { names, exclude: new Set(known.map(item => `${item.name}:${item.size}`)) });
     if (!fetched.saved.length) {
       if (fetched.directory) await require('node:fs/promises').rm(fetched.directory, { recursive: true, force: true }).catch(() => {});
       return { files: [], skipped: fetched.skipped };
@@ -416,7 +485,7 @@ class TaskRunner {
     if (!carrier.artifacts?.length) throw new Error(carrier.text.trim().replace(/^（|）$/g, '') || '文件未能存入资料');
     const saved = await this.store.update(draft => {
       const message = draft.tasks.find(item => item.id === taskId)?.messages.find(item => item.id === reply.id);
-      if (message) message.artifacts = [...(message.artifacts || []), ...carrier.artifacts];
+      if (message) { message.artifacts = [...(message.artifacts || []), ...carrier.artifacts]; message.artifactsWorkspace = carrier.artifactsWorkspace; }
       return draft;
     });
     this.publish(saved);
@@ -579,17 +648,20 @@ class TaskRunner {
   }
 
   async recordAnswer(taskId, triggerId, answer) {
-    const failed = answer?.source === 'connection-error';
+    const failed = answer?.source === 'connection-error' || answer?.stopReason === 'timeout';
     // Take the declared key progress out of the reply; keep it as drafts.
     let drafts = [];
     if (answer?.role === 'assistant' && !failed && answer.source !== 'workbuddy-pending' && typeof answer.text === 'string') {
+      const before = (await this.store.read()).tasks.find(item => item.id === taskId);
+      const messages = before ? messagesThroughTrigger(before.messages, triggerId) || before.messages : [];
       const extracted = progress.extractProgress(answer.text);
       answer.text = extracted.text;
-      const items = extracted.found ? extracted.items : progress.fallbackProgress(extracted.text, answer.artifacts || []);
-      const existing = (await this.store.read()).tasks.find(item => item.id === taskId)?.progress || [];
-      drafts = progress.draft(progress.dedupe(items, existing), { sourceMessageId: answer.id, author: 'agent' });
-      const personalUse = drafts.length ? await this.personalContextOf(taskId, triggerId) : null;
-      if (personalUse) for (const item of drafts) item.personal = personalUse;
+      if (before && classifyTask({ ...before, messages: [...messages, answer] }) !== 'conversation') {
+        const items = extracted.found ? extracted.items : progress.fallbackProgress(extracted.text, answer.artifacts || []);
+        drafts = progress.draft(progress.dedupe(items, before.progress || []), { sourceMessageId: answer.id, author: 'agent' });
+        const personalUse = drafts.length ? await this.personalContextOf(taskId, triggerId) : null;
+        if (personalUse) for (const item of drafts) item.personal = personalUse;
+      }
     }
     const isolatedSession = Boolean(answer?.isolatedSession);
     if (answer) delete answer.isolatedSession;
@@ -603,7 +675,7 @@ class TaskRunner {
         current.agentSessionId = answer.agentSessionId;
         if ('agentSessionOwner' in answer) current.agentSessionOwner = answer.agentSessionOwner;
       }
-      current.agentRun = { status: failed ? 'failed' : 'done', triggerId, updatedAt: new Date().toISOString() };
+      current.agentRun = { ...current.agentRun, status: failed ? 'failed' : 'done', triggerId, updatedAt: new Date().toISOString(), ...(answer?.stopReason === 'timeout' ? { message: '这一轮达到 2 小时保护上限，已停止等待；保留部分结果，不代表完成。' } : {}) };
       current.updatedAt = current.agentRun.updatedAt;
       if (failed || (current.workflow && answer?.source !== 'workbuddy-pending')) current.needsMe = true;
       if (current.workflow && !failed && answer?.source !== 'workbuddy-pending') current.status = 'review';
